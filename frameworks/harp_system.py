@@ -12,6 +12,21 @@ from torch.utils.checkpoint import checkpoint
 
 epsilon = 1e-4
 
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, dim: int, max_len: int = 512):
+        super().__init__()
+        position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, dim, 2, dtype=torch.float32) * (-torch.log(torch.tensor(10000.0)) / dim))
+        pe = torch.zeros(max_len, dim, dtype=torch.float32)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        seq_len = x.shape[1]
+        return x + self.pe[:, :seq_len].to(device=x.device, dtype=x.dtype)
+
 # Set Transformer
 class TransformerModel(nn.Module):
     def __init__(self, in_dim: int, nhead: int, dim_feedforward: int,
@@ -45,6 +60,193 @@ class TransformerModel(nn.Module):
         
         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
         return output
+
+
+class TunnelEncoder(nn.Module):
+    def __init__(self, input_dim: int, props):
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_transformer_layers = props.num_transformer_layers
+        self.dropout = props.dropout
+        self.num_mlp1_hidden_layers = props.num_mlp1_hidden_layers
+        self.use_temporal_cls = getattr(props, "use_temporal_cls", True)
+        self.use_temporal_residual = getattr(props, "use_temporal_residual", True)
+        self.recency_alpha = getattr(props, "temporal_recency_alpha", 0.1)
+
+        self.cls_token = nn.Parameter(torch.Tensor(1, input_dim))
+        nn.init.kaiming_normal_(self.cls_token, nonlinearity='relu')
+        self.temporal_cls = nn.Parameter(torch.Tensor(1, 1, input_dim))
+        nn.init.kaiming_normal_(self.temporal_cls, nonlinearity='relu')
+
+        if props.num_heads == 0:
+            num_heads = input_dim // 4
+        else:
+            num_heads = props.num_heads
+
+        self.set_transformer = TransformerModel(
+            in_dim=input_dim,
+            nhead=num_heads,
+            dim_feedforward=input_dim,
+            nlayers=self.num_transformer_layers,
+            dropout=self.dropout,
+            activation="gelu",
+        )
+        self.temporal_positional_encoding = SinusoidalPositionalEncoding(input_dim)
+        temporal_layer = TransformerEncoderLayer(
+            d_model=input_dim,
+            nhead=4,
+            dim_feedforward=input_dim * 2,
+            dropout=self.dropout,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.temporal_transformer = TransformerEncoder(temporal_layer, num_layers=1)
+        self.temporal_input_projection = nn.Linear(input_dim + 1, input_dim)
+        self.temporal_dropout = nn.Dropout(p=props.dropout)
+
+        self.mlp_1_dim = input_dim + 1
+        self.mlp1 = nn.ModuleList()
+        self.mlp1.append(nn.Linear(self.mlp_1_dim, self.mlp_1_dim))
+        for _ in range(self.num_mlp1_hidden_layers):
+            self.mlp1.append(nn.Linear(self.mlp_1_dim, self.mlp_1_dim))
+        self.mlp1.append(nn.Linear(self.mlp_1_dim, 1))
+
+    def forward_pass_mlp(self, inputs, mlp: nn.ModuleList, num_hidden_layers):
+        for index, layer in enumerate(mlp):
+            if index == 0:
+                gammas_1 = F.leaky_relu(layer(inputs), 0.02)
+            elif index == (num_hidden_layers + 1):
+                gammas_1 = layer(gammas_1)
+            else:
+                gammas_1 = F.leaky_relu(layer(gammas_1), 0.02)
+
+        return gammas_1
+
+    def _normalize_tm_pred(self, tm_pred: Tensor):
+        if tm_pred.dim() == 2:
+            return tm_pred.unsqueeze(0).unsqueeze(1)
+        if tm_pred.dim() == 3:
+            return tm_pred.unsqueeze(1)
+        if tm_pred.dim() == 4:
+            return tm_pred
+        raise ValueError(f"Unsupported tm_pred shape: {tuple(tm_pred.shape)}")
+
+    def generate_causal_mask(self, K: int, device):
+        return torch.triu(
+            torch.full((K, K), float("-inf"), device=device),
+            diagonal=1
+        )
+
+    def _build_recency_weights(self, num_timesteps: int, device, dtype):
+        if num_timesteps <= 0:
+            raise ValueError("num_timesteps must be positive")
+        positions = torch.arange(num_timesteps, device=device, dtype=dtype)
+        if num_timesteps == 1:
+            normalized_positions = torch.zeros_like(positions)
+        else:
+            normalized_positions = positions / max(num_timesteps - 1, 1)
+        return 1.0 + self.recency_alpha * normalized_positions.pow(2)
+
+    def forward(self, path_edge_inputs: Tensor, tm_pred: Tensor, path_padding_mask: Tensor = None):
+        """
+        Args:
+            path_edge_inputs: [B, P, L, D] or [B, P, T, L, D]
+            tm_pred: [B, P, 1] or [B, T, P, 1]
+
+        Returns:
+            Tuple[Tensor, Tensor, Tensor]:
+            - gammas: [B, P, 1]
+            - final_path_edge_embeddings: [B, P, L, D]
+            - final_path_embeddings: [B, P, D]
+        """
+        if path_edge_inputs.dim() == 4:
+            path_edge_inputs = path_edge_inputs.unsqueeze(2)
+            if path_padding_mask is not None:
+                path_padding_mask = path_padding_mask.unsqueeze(2)
+        elif path_edge_inputs.dim() != 5:
+            raise ValueError(f"Unsupported path edge input shape: {tuple(path_edge_inputs.shape)}")
+
+        batch_size, total_number_of_paths, num_timesteps, max_path_length, _ = path_edge_inputs.shape
+
+        flat_inputs = path_edge_inputs.contiguous().reshape(
+            batch_size * total_number_of_paths * num_timesteps, max_path_length, self.input_dim
+        )
+        cls_token = self.cls_token.view(1, 1, self.input_dim).expand(flat_inputs.shape[0], -1, -1)
+        flat_inputs = torch.cat((cls_token, flat_inputs), dim=1)
+        src_key_padding_mask = None
+        if path_padding_mask is not None:
+            flat_mask = path_padding_mask.contiguous().reshape(
+                batch_size * total_number_of_paths * num_timesteps, max_path_length
+            )
+            cls_mask = torch.zeros(flat_mask.shape[0], 1, device=flat_mask.device, dtype=torch.bool)
+            src_key_padding_mask = torch.cat((cls_mask, flat_mask), dim=1)
+
+        with sdpa_kernel([SDPBackend.MATH]):
+            flat_outputs = self.set_transformer(flat_inputs, src_key_padding_mask=src_key_padding_mask)
+
+        set_outputs = flat_outputs.contiguous().reshape(
+            batch_size, total_number_of_paths, num_timesteps, max_path_length + 1, self.input_dim
+        )
+        timestep_embeddings = set_outputs[:, :, :, 0, :]
+        last_embedding = timestep_embeddings[:, :, -1, :]
+
+        # Inject temporal demand history before temporal aggregation:
+        # tm_pred: [B, T, P, 1] -> [B, P, T, 1], then concatenate with per-timestep tunnel embeddings.
+        tm_pred = self._normalize_tm_pred(tm_pred)
+        tm_pred = tm_pred.permute(0, 2, 1, 3).contiguous()
+        assert tm_pred.shape[:3] == (batch_size, total_number_of_paths, num_timesteps)
+        tm_pred = tm_pred / (tm_pred.max(dim=2, keepdim=True).values.clamp_min(1e-6))
+        temporal_inputs = torch.cat((timestep_embeddings, tm_pred), dim=-1)
+        temporal_inputs = self.temporal_input_projection(temporal_inputs)
+        assert temporal_inputs.shape[-1] == self.input_dim
+
+        # Lightweight recency bias so newer timesteps receive slightly larger magnitude.
+        recency_weights = self._build_recency_weights(
+            num_timesteps, temporal_inputs.device, temporal_inputs.dtype
+        )
+        temporal_inputs = temporal_inputs * recency_weights.view(1, 1, num_timesteps, 1)
+        temporal_inputs = self.temporal_dropout(temporal_inputs)
+        temporal_inputs = temporal_inputs.contiguous().reshape(
+            batch_size * total_number_of_paths, num_timesteps, self.input_dim
+        )
+
+        if self.use_temporal_cls:
+            temporal_cls = self.temporal_cls.expand(temporal_inputs.shape[0], -1, -1)
+            temporal_inputs = torch.cat((temporal_cls, temporal_inputs), dim=1)
+
+        temporal_inputs = self.temporal_positional_encoding(temporal_inputs)
+
+        # Apply causal masking over time so each timestep only attends to current/past history.
+        K = num_timesteps
+        device = temporal_inputs.device
+
+        base_mask = self.generate_causal_mask(K, device)
+        if self.use_temporal_cls:
+            full_mask = torch.zeros(K + 1, K + 1, device=device)
+            full_mask[0, :] = 0
+            full_mask[1:, 0] = 0
+            full_mask[1:, 1:] = base_mask
+            temporal_mask = full_mask
+        else:
+            temporal_mask = base_mask
+
+        temporal_outputs = self.temporal_transformer(temporal_inputs, mask=temporal_mask)
+        temporal_outputs = temporal_outputs.contiguous().reshape(
+            batch_size, total_number_of_paths, temporal_outputs.shape[1], self.input_dim
+        )
+        if self.use_temporal_cls:
+            final_path_embeddings = temporal_outputs[:, :, 0, :]
+        else:
+            final_path_embeddings = temporal_outputs[:, :, -1, :]
+        if self.use_temporal_residual:
+            final_path_embeddings = final_path_embeddings + last_embedding
+        final_path_edge_embeddings = set_outputs[:, :, -1, 1:, :]
+
+        final_tm_pred = tm_pred[:, :, -1, :]
+        mlp_inputs = torch.cat((final_path_embeddings, final_tm_pred), dim=-1)
+        gammas = self.forward_pass_mlp(mlp_inputs, self.mlp1, self.num_mlp1_hidden_layers)
+
+        return gammas, final_path_edge_embeddings, final_path_embeddings
 
 # GNN of HARP
 class GNN(nn.Module):
@@ -118,7 +320,7 @@ class GNN(nn.Module):
         _, num_edges, _ = edge_index_expanded.shape
         
         # Create a batch index
-        batch_index = torch.arange(batch_size).view(-1, 1, 1)
+        batch_index = torch.arange(batch_size, device=node_embeddings.device).view(-1, 1, 1)
         batch_index = batch_index.expand(-1, num_edges, 2)  # Repeat the batch index for each edge
         edge_embeddings = node_embeddings[batch_index, edge_index_expanded]
         capacities = capacities.unsqueeze(-1)
@@ -146,28 +348,7 @@ class HARP(nn.Module):
         self.gnn = GNN(2, self.num_gnn_layers)
 
         self.input_dim = self.gnn.output_dim + 1
-        
-        # CLS Token for the Set Transformer
-        self.cls_token = nn.Parameter(torch.Tensor(1, self.input_dim))
-        nn.init.kaiming_normal_(self.cls_token, nonlinearity='relu')
-        
-        if props.num_heads == 0:
-            num_heads = self.input_dim//4
-        else:
-            num_heads = props.num_heads
-        
-        # Define the Set Transformer
-        self.transformer = TransformerModel(in_dim = self.input_dim, nhead=num_heads,
-                            dim_feedforward=self.input_dim, nlayers=self.num_transformer_layers, 
-                            dropout=self.dropout, activation="gelu")
-        
-        # Define the 1st MLP
-        self.mlp_1_dim = self.input_dim + 1
-        self.mlp1 = nn.ModuleList()
-        self.mlp1.append(nn.Linear(self.mlp_1_dim, self.mlp_1_dim))
-        for i in range(self.num_mlp1_hidden_layers):
-            self.mlp1.append(nn.Linear(self.mlp_1_dim, self.mlp_1_dim))
-        self.mlp1.append(nn.Linear(self.mlp_1_dim, 1))
+        self.tunnel_encoder = TunnelEncoder(self.input_dim, props)
         
         # Define the 2nd MLP (Recurrent Adjustment Unit - RAU)
         self.mlp_2_dim = self.input_dim + 3
@@ -199,50 +380,15 @@ class HARP(nn.Module):
         
         num_for_loops = props.num_for_loops
         num_paths_per_pair = props.num_paths_per_pair
-        if props.checkpoint:
-            edge_embeddings_with_caps = checkpoint(self.gnn, node_features, edge_index, capacities, use_reentrant=False)
-        else:
-            edge_embeddings_with_caps = self.gnn(node_features, edge_index, capacities)
+        edge_embeddings_with_caps = self.compute_edge_embeddings(props, node_features, edge_index, capacities)
+        tm = self.normalize_tm(tm)
+        tm_pred = self.normalize_tm(tm_pred)
+        capacities = self.normalize_capacities(capacities, tm.shape[0], props)
         batch_size = tm.shape[0]
-        if props.dynamic:
-            batch_size_tf = batch_size
-        else:
-            batch_size_tf = 1
         total_number_of_paths = paths_to_edges.shape[0]
-        cls_token = self.cls_token.unsqueeze(0)
-        if props.mode == "train" or (props.mode == "test" and not hasattr(self, "transformer_output")):
-            if props.checkpoint:
-                transformer_output = checkpoint(self.compute_transformer_output, edge_embeddings_with_caps, edge_ids_dict_tensor, original_pos_edge_ids_dict_tensor, batch_size_tf, total_number_of_paths, props, cls_token, use_reentrant=False)
-            else:
-                transformer_output = self.compute_transformer_output(edge_embeddings_with_caps, edge_ids_dict_tensor, original_pos_edge_ids_dict_tensor, batch_size_tf, total_number_of_paths, props, cls_token)
-        else:
-            pass
 
-        if props.mode == "train":
-            if not props.dynamic:
-                transformer_output = transformer_output.expand(batch_size, -1, -1, -1)
-                capacities = capacities.expand(batch_size, -1)
-        elif (props.mode == "test" and not hasattr(self, "transformer_output") and not props.dynamic):
-            capacities = capacities.expand(batch_size, -1)
-            self.transformer_output = transformer_output.expand(batch_size, -1, -1, -1)  
-        if props.mode == "train":
-            path_embeddings = transformer_output[:, :, 0, :]
-            path_edge_embeddings = transformer_output[:, :, 1:, :]
-        elif props.mode == "test":
-            if not props.dynamic:
-                path_embeddings = self.transformer_output[:, :, 0, :]
-                path_edge_embeddings = self.transformer_output[:, :, 1:, :]
-            else:
-                path_embeddings = transformer_output[:, :, 0, :]
-                path_edge_embeddings = transformer_output[:, :, 1:, :]
-        
-        # Predicted matrix        
-        path_embeddings = torch.cat((path_embeddings, tm_pred), dim=-1)
-
-        if props.checkpoint:
-            gammas = checkpoint(self.forward_pass_mlp, path_embeddings, self.mlp1, self.num_mlp1_hidden_layers, use_reentrant=False)
-        else:
-            gammas = self.forward_pass_mlp(path_embeddings, self.mlp1, self.num_mlp1_hidden_layers)
+        path_edge_inputs, path_padding_mask = self.gather_path_edge_inputs(edge_embeddings_with_caps, padded_edge_ids_per_path)
+        gammas, path_edge_embeddings, _ = self.tunnel_encoder(path_edge_inputs, tm_pred, path_padding_mask)
                 
         paths_to_edges = paths_to_edges.coalesce()
         indices = paths_to_edges.indices()
@@ -292,8 +438,68 @@ class HARP(nn.Module):
             edges_util = self.compute_edge_utils(new_gammas, paths_to_edges, tm, capacities, props, batch_size, num_paths_per_pair, add_epsilon=False)
         
         return edges_util
-    
 
+    def normalize_tm(self, tm: Tensor):
+        if tm.dim() == 2:
+            tm = tm.unsqueeze(0)
+        elif tm.dim() == 4:
+            tm = tm[:, -1]
+        return tm
+
+    def normalize_capacities(self, capacities: Tensor, batch_size: int, props):
+        if capacities.dim() == 3:
+            capacities = capacities[:, -1]
+        if capacities.dim() == 2 and not props.dynamic and batch_size > 1 and capacities.shape[0] == 1:
+            capacities = capacities.expand(batch_size, -1)
+        return capacities
+
+    def compute_edge_embeddings(self, props, node_features, edge_index, capacities):
+        if node_features.dim() == 4:
+            num_timesteps = node_features.shape[1]
+            edge_embeddings_over_time = []
+            for timestep in range(num_timesteps):
+                nf = node_features[:, timestep, :, :]
+                caps = capacities[:, timestep, :,]
+                if props.checkpoint:
+                    edge_embeddings_t = checkpoint(self.gnn, nf, edge_index, caps, use_reentrant=False)
+                else:
+                    edge_embeddings_t = self.gnn(nf, edge_index, caps)
+                edge_embeddings_over_time.append(edge_embeddings_t)
+            return torch.stack(edge_embeddings_over_time, dim=1)
+
+        if props.checkpoint:
+            return checkpoint(self.gnn, node_features, edge_index, capacities, use_reentrant=False)
+        return self.gnn(node_features, edge_index, capacities)
+
+    def gather_path_edge_inputs(self, edge_embeddings_with_caps: Tensor, padded_edge_ids_per_path: Tensor):
+        safe_edge_ids = padded_edge_ids_per_path.clamp(min=0)
+        path_mask = padded_edge_ids_per_path.eq(-1)
+
+        if edge_embeddings_with_caps.dim() == 3:
+            batch_size, _, feat_dim = edge_embeddings_with_caps.shape
+            total_number_of_paths, max_path_length = safe_edge_ids.shape
+            gather_indices = safe_edge_ids.view(1, total_number_of_paths, max_path_length, 1).expand(
+                batch_size, -1, -1, feat_dim
+            )
+            expanded_edges = edge_embeddings_with_caps.unsqueeze(1).expand(-1, total_number_of_paths, -1, -1)
+            path_edge_inputs = torch.gather(expanded_edges, 2, gather_indices)
+            path_edge_inputs = path_edge_inputs.masked_fill(path_mask.view(1, total_number_of_paths, max_path_length, 1), 0.0)
+            return path_edge_inputs, path_mask.view(1, total_number_of_paths, max_path_length).expand(batch_size, -1, -1)
+
+        batch_size, num_timesteps, _, feat_dim = edge_embeddings_with_caps.shape
+        total_number_of_paths, max_path_length = safe_edge_ids.shape
+        gather_indices = safe_edge_ids.view(1, 1, total_number_of_paths, max_path_length, 1).expand(
+            batch_size, num_timesteps, -1, -1, feat_dim
+        )
+        expanded_edges = edge_embeddings_with_caps.unsqueeze(2).expand(-1, -1, total_number_of_paths, -1, -1)
+        path_edge_inputs = torch.gather(expanded_edges, 3, gather_indices)
+        path_edge_inputs = path_edge_inputs.masked_fill(
+            path_mask.view(1, 1, total_number_of_paths, max_path_length, 1), 0.0
+        )
+        path_padding_mask = path_mask.view(1, 1, total_number_of_paths, max_path_length).expand(
+            batch_size, num_timesteps, -1, -1
+        )
+        return path_edge_inputs.permute(0, 2, 1, 3, 4).contiguous(), path_padding_mask.permute(0, 2, 1, 3).contiguous()
 
     def compute_mlu(self, edges_util, batch_size, total_number_of_paths, subtract_epsilon=True):
             """
@@ -392,35 +598,6 @@ class HARP(nn.Module):
         bottleneck_path_edge_embeddings = (path_edge_embeddings[dim0_range, dim1_range, positions]).squeeze(-2)
                 
         return bottleneck_path_edge_embeddings, max_utilization_per_path.unsqueeze(-1)
-
-
-    def compute_transformer_output(self, edge_embeddings_with_caps, edge_ids_dict_tensor, original_pos_edge_ids_dict_tensor, batch_size_tf, total_number_of_paths, props, cls_token):
-        """
-        Forward pass of the Set Transformer.
-        """
-        
-        max_path_length = max(list(edge_ids_dict_tensor.keys())) + 1 # due to CLS token
-        transformer_output = torch.empty((batch_size_tf, total_number_of_paths, max_path_length, self.input_dim),
-                                            device=self.device, dtype=props.dtype)
-        for i, key in enumerate(sorted(edge_ids_dict_tensor.keys())):
-            temp_embds = edge_embeddings_with_caps[:, edge_ids_dict_tensor[key], :]
-            if props.dynamic:
-                temp_cls_token = cls_token.expand(batch_size_tf, edge_ids_dict_tensor[key].shape[0], -1).unsqueeze(-2)
-            else:
-                temp_cls_token = cls_token.expand(1, edge_ids_dict_tensor[key].shape[0], -1).unsqueeze(-2)
-            
-            temp_embds = torch.cat((temp_cls_token, temp_embds), dim=-2)
-            x1, x2, x3, x4 = temp_embds.shape
-            temp_embds = temp_embds.reshape(x1*x2, x3, x4).contiguous()
-            with sdpa_kernel([SDPBackend.MATH]):
-                temp_embds = self.transformer(temp_embds)
-            # with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
-            #     temp_embds = self.transformer(temp_embds)
-            temp_embds = temp_embds.reshape(x1, x2, x3, x4)
-            temp_embds = F.pad(temp_embds, (0, 0, 0, max_path_length - temp_embds.shape[2]), value=0.0)
-            transformer_output[:, original_pos_edge_ids_dict_tensor[key], :, :] = temp_embds
-        
-        return transformer_output
 
 
     def forward_pass_mlp(self, inputs, mlp: nn.ModuleList, num_hidden_layers):
