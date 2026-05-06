@@ -1,0 +1,21 @@
+# Logs
+*.log
+logs/
+
+# Data
+data/
+*.csv
+*.json
+*.pkl
+*.h5
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+.env
+harp_env/
+
+# Data
+prepare_abilene/
+results/
