@@ -84,6 +84,268 @@ HARP was tested using the following setup:
  
  - You can specify ``--pred_type`` (default: `esm`) to indicate the predictor type if you manage multiple predicted datasets.
 
+## Dynamic Abilene Temporal, Baseline, and Resiliency Experiments
+
+This fork includes a dynamic Abilene pipeline used for GRATE-style temporal TE
+experiments. The generated samples live in `dynamic_abilene_h6_1000_samples/`
+and have six-timestep histories, time-indexed topology/path tensors, final-step
+traffic matrices, and Gurobi optimal MLU labels in `sample["opt"]`.
+
+### Current-step temporal HARP
+
+Train the temporal model on the dynamic samples:
+
+```bash
+./train_dynamic_abilene_local_m3.sh
+```
+
+For a quick smoke test:
+
+```bash
+EPOCHS=1 TRAIN_END=20 VAL_START=20 VAL_END=30 ./train_dynamic_abilene_local_m3.sh
+```
+
+Test the trained temporal model with:
+
+```bash
+python3 run_harp.py \
+  --topo dynamic_abilene \
+  --mode test \
+  --num_paths_per_pair 4 \
+  --num_for_loops 3 \
+  --test_cluster 0 \
+  --framework harp \
+  --pred 0 \
+  --dynamic 1 \
+  --dynamic_samples_dir dynamic_abilene_h6_1000_samples \
+  --dynamic_test_start_idx 800 \
+  --dynamic_test_end_idx 1000
+```
+
+This writes:
+
+```text
+results/dynamic_abilene/4sp/0/harp_dynamic_values_failure_id_None.txt
+results/dynamic_abilene/4sp/0/harp_dynamic_stats_failure_id_None.txt
+```
+
+### Snapshot-only HARP baseline on the same data
+
+The baseline uses the same dynamic sample files and Gurobi labels, but only the
+final timestep of each sample. It does not receive temporal history.
+
+Train:
+
+```bash
+./train_baseline_dynamic_abilene_local_m3.sh
+```
+
+Smoke test:
+
+```bash
+EPOCHS=1 TRAIN_END=20 VAL_START=20 VAL_END=30 ./train_baseline_dynamic_abilene_local_m3.sh
+```
+
+Test:
+
+```bash
+./test_baseline_dynamic_abilene_local_m3.sh
+```
+
+This writes:
+
+```text
+results/dynamic_abilene/4sp/0/harp_baseline_dynamic_values_failure_id_None.txt
+results/dynamic_abilene/4sp/0/harp_baseline_dynamic_stats_failure_id_None.txt
+```
+
+Observed current-step normalized MLU on the 200-sample held-out slice
+`[800, 1000)`:
+
+```text
+Temporal HARP:
+  Average: 1.0267
+  Median:  1.0265
+  95TH:    1.0531
+  Max:     1.1145
+
+Snapshot-only HARP baseline:
+  Average: 1.0837
+  Median:  1.0839
+  95TH:    1.1723
+  Max:     1.2800
+```
+
+The temporal model wins on 194/200 paired held-out samples, with about 5.1%
+mean relative improvement over the snapshot baseline. Before fixing the
+temporal path encoder padding mask, the temporal checkpoint collapsed to
+uniform splitting and produced average normalized MLU about 4.3037 on the same
+slice; that debugging result is kept as a reference point.
+
+### Future-failure resiliency objective
+
+The resiliency runner trains or evaluates a model under a combined current MLU
+and future-failure stress objective. It keeps the learned final-step split fixed
+and evaluates single-link degradation scenarios on the final topology:
+
+```text
+combined =
+  current_weight * current_norm
+  + resilience_weight * (
+      (1 - worst_case_weight) * expected_failure_norm
+      + worst_case_weight * worst_failure_norm
+    )
+```
+
+where:
+
+- `current_norm` is current model MLU divided by the current Gurobi optimum.
+- `expected_failure_norm` is the probability-weighted MLU under single-link
+  degradation scenarios, normalized by the current Gurobi optimum.
+- `worst_failure_norm` is the worst selected single-link degradation scenario,
+  also normalized by the current Gurobi optimum.
+- Scenario probabilities come from recent failure history in
+  `sample["metadata"]["failed_by_t"]` plus a uniform prior.
+- `failure_capacity_fraction` controls the severity. The default `0.25` means
+  one scenario link keeps 25 percent of its original capacity. This is a
+  differentiable stress metric, not a post-failure reoptimization LP.
+
+Train the resilient temporal model:
+
+```bash
+./train_resilient_dynamic_abilene_local_m3.sh
+```
+
+Smoke test:
+
+```bash
+EPOCHS=1 TRAIN_END=20 VAL_START=20 VAL_END=30 ./train_resilient_dynamic_abilene_local_m3.sh
+```
+
+Useful knobs:
+
+```bash
+RESILIENCE_WEIGHT=0.5 \
+WORST_CASE_WEIGHT=0.75 \
+FAILURE_CAPACITY_FRACTION=0.1 \
+./train_resilient_dynamic_abilene_local_m3.sh
+```
+
+Test the resilient temporal checkpoint:
+
+```bash
+./test_resilience_dynamic_abilene_local_m3.sh
+```
+
+Stress-test the current-step temporal checkpoint under the same resiliency
+metric:
+
+```bash
+MODEL_TYPE=temporal \
+MODEL_PATH=HARP_dynamic_dynamic_abilene_pred_False_4sp.pkl \
+./test_resilience_dynamic_abilene_local_m3.sh
+```
+
+Stress-test the snapshot-only baseline checkpoint:
+
+```bash
+MODEL_TYPE=baseline \
+MODEL_PATH=HARP_baseline_dynamic_abilene_pred_False_4sp.pkl \
+./test_resilience_dynamic_abilene_local_m3.sh
+```
+
+Compare a trained resilient temporal checkpoint against the snapshot-only
+baseline checkpoint in one run:
+
+```bash
+./compare_resilient_vs_baseline_dynamic_abilene_local_m3.sh
+```
+
+By default this expects
+`HARP_resilient_temporal_dynamic_abilene_pred_False_4sp.pkl` and
+`HARP_baseline_dynamic_abilene_pred_False_4sp.pkl`. Override paths or the test
+slice like this:
+
+```bash
+RESILIENT_MODEL_PATH=my_resilient.pkl \
+BASELINE_MODEL_PATH=HARP_baseline_dynamic_abilene_pred_False_4sp.pkl \
+TEST_START=800 \
+TEST_END=1000 \
+./compare_resilient_vs_baseline_dynamic_abilene_local_m3.sh
+```
+
+The comparison script prints a side-by-side summary for `combined`, `current`,
+`expected_failure`, and `worst_failure`, and writes detailed files under
+`results/dynamic_abilene/4sp/0/resilience_compare/`.
+
+To compare all three trained models--resilient temporal, vanilla temporal, and
+snapshot-only baseline--under the same resilience evaluator:
+
+```bash
+./compare_all_dynamic_abilene_local_m3.sh
+```
+
+This expects these default checkpoints:
+
+```text
+HARP_resilient_temporal_dynamic_abilene_pred_False_4sp.pkl
+HARP_dynamic_dynamic_abilene_pred_False_4sp.pkl
+HARP_baseline_dynamic_abilene_pred_False_4sp.pkl
+```
+
+Override any checkpoint or the held-out slice with environment variables:
+
+```bash
+RESILIENT_MODEL_PATH=my_resilient.pkl \
+TEMPORAL_MODEL_PATH=HARP_dynamic_dynamic_abilene_pred_False_4sp.pkl \
+BASELINE_MODEL_PATH=HARP_baseline_dynamic_abilene_pred_False_4sp.pkl \
+TEST_START=800 \
+TEST_END=1000 \
+./compare_all_dynamic_abilene_local_m3.sh
+```
+
+The three-way comparison writes detailed files under
+`results/dynamic_abilene/4sp/0/resilience_compare_all/`.
+
+Observed three-way resilience comparison on the 200-sample held-out slice
+`[800, 1000)`:
+
+```text
+Average normalized metrics. Lower is better.
+
+metric              resilient_temporal    vanilla_temporal    snapshot_baseline
+combined                      1.848040            1.835491             1.937549
+current                       1.039879            1.028735             1.083662
+expected_failure              2.305775            2.339113             2.496445
+worst_failure                 4.159516            4.114938             4.334649
+
+Pairwise improvement percentages. Positive means the left model is better.
+
+metric              resilient vs baseline    resilient vs temporal    temporal vs baseline
+combined                            4.62%                   -0.68%                   5.27%
+current                             4.04%                   -1.08%                   5.07%
+expected_failure                    7.64%                    1.43%                   6.30%
+worst_failure                       4.04%                   -1.08%                   5.07%
+```
+
+The resilient temporal checkpoint uses the same architecture as vanilla
+temporal HARP; the difference is the training objective. These results suggest
+that the resilience objective trades a small amount of current-step MLU for
+better probability-weighted future-failure behavior: resilient temporal HARP is
+best on `expected_failure`, while vanilla temporal HARP remains best on
+`combined`, `current`, and `worst_failure` with the default objective weights.
+
+The resiliency test writes four distributions per model:
+
+```text
+harp_resilient_<model_type>_dynamic_failure_id_None_combined_*.txt
+harp_resilient_<model_type>_dynamic_failure_id_None_current_*.txt
+harp_resilient_<model_type>_dynamic_failure_id_None_expected_failure_*.txt
+harp_resilient_<model_type>_dynamic_failure_id_None_worst_failure_*.txt
+```
+
+These files are written under `results/dynamic_abilene/4sp/0/` by default.
+
 ## Reproduce Single-link Failure Experiments on Abilene and GEANT
 - After training HARP model on GEANT and Abilene, run:
   - ``python3 run_failures.py --topo geant --num_paths_per_pair 8 --num_for_loops X --test_start_idx start --test_end_idx end --pred 0 --test_cluster 0``

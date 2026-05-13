@@ -183,7 +183,7 @@ class BaselineHARP(nn.Module):
         if num_for_loops == 0:
             new_gammas = gammas
 
-        return self.compute_edge_utils(
+        edges_util = self.compute_edge_utils(
             gammas=new_gammas,
             paths_to_edges=paths_to_edges,
             tm=tm,
@@ -193,6 +193,34 @@ class BaselineHARP(nn.Module):
             num_paths_per_pair=num_paths_per_pair,
             add_epsilon=False,
         )
+
+        if getattr(props, "return_details", False):
+            split_ratios = self.compute_split_ratios(
+                new_gammas,
+                batch_size,
+                num_paths_per_pair,
+            )
+            data_on_tunnels = split_ratios * tm.squeeze(-1)
+            data_on_links = torch.sparse.mm(
+                paths_to_edges.to(dtype=torch.float32).t(),
+                data_on_tunnels.to(dtype=torch.float32).t(),
+            ).t()
+
+            if props.dtype == torch.bfloat16:
+                data_on_links = data_on_links.to(dtype=torch.bfloat16)
+
+            return {
+                "edges_util": edges_util,
+                "gammas": new_gammas,
+                "split_ratios": split_ratios,
+                "data_on_links": data_on_links,
+                "paths_to_edges": paths_to_edges,
+                "capacities": capacities,
+                "edge_index": edge_index,
+                "tm": tm,
+            }
+
+        return edges_util
 
     def normalize_tm(self, tm: Tensor):
         if tm.dim() == 2:

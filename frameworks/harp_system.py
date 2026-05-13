@@ -605,6 +605,7 @@ class HARP(nn.Module):
             final_paths_to_edges = paths_to_edges[-1].coalesce()
             final_padded_paths = padded_edge_ids_per_path[-1]
             final_capacities = capacities[-1]
+            final_edge_index = edge_index[-1]
 
             if final_capacities.dim() == 1:
                 final_capacities = final_capacities.unsqueeze(0).expand(batch_size, -1)
@@ -629,6 +630,7 @@ class HARP(nn.Module):
                 batch_size=batch_size,
                 props=props,
             )
+            final_edge_index = edge_index
 
         total_number_of_paths = final_paths_to_edges.shape[0]
 
@@ -750,6 +752,33 @@ class HARP(nn.Module):
             num_paths_per_pair=num_paths_per_pair,
             add_epsilon=False,
         )
+
+        if getattr(props, "return_details", False):
+            split_ratios = self.compute_split_ratios(
+                new_gammas,
+                batch_size,
+                num_paths_per_pair,
+            )
+
+            data_on_tunnels = split_ratios * tm_final.squeeze(-1)
+            data_on_links = torch.sparse.mm(
+                final_paths_to_edges.to(dtype=torch.float32).t(),
+                data_on_tunnels.to(dtype=torch.float32).t(),
+            ).t()
+
+            if props.dtype == torch.bfloat16:
+                data_on_links = data_on_links.to(dtype=torch.bfloat16)
+
+            return {
+                "edges_util": edges_util,
+                "gammas": new_gammas,
+                "split_ratios": split_ratios,
+                "data_on_links": data_on_links,
+                "paths_to_edges": final_paths_to_edges,
+                "capacities": final_capacities,
+                "edge_index": final_edge_index,
+                "tm": tm_final,
+            }
 
         return edges_util
 
