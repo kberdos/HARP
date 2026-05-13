@@ -20,7 +20,7 @@
 % usepackage command, below.
 
 \documentclass[letterpaper,twocolumn,10pt]{article}
-\usepackage{usenix,epsfig,endnotes}
+\usepackage{usenix,epsfig,endnotes,graphicx}
 \begin{document}
 
 %don't want date printed
@@ -177,6 +177,15 @@ Snapshot HARP baseline & 1.0837 & 1.1723 & 1.2800 \\
 \end{tabular}
 \end{center}
 
+Figure~\ref{fig:current-mlu-percentiles} shows the same current-step comparison across the held-out percentile profile.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/dynamic_abilene/current_normalized_mlu_percentiles.png}
+\caption{Held-out normalized current-step MLU percentiles on dynamic Abilene. The temporal model improves the upper tail relative to the snapshot-only baseline, especially at the 95th and 99th percentiles.}
+\label{fig:current-mlu-percentiles}
+\end{figure}
+
 As a debugging reference point, before correcting the padding-mask handling in the temporal path encoder, the saved model collapsed to uniform path splits and produced an average normalized MLU of approximately 4.3037 on the same held-out slice. The corrected result therefore reflects an actual learned routing policy rather than an equal-split fallback.
 
 Because the current-step MLU gap between temporal HARP and the snapshot baseline is modest, we also evaluated a robustness-oriented training objective. The resilient temporal checkpoint uses the same architecture as temporal HARP, but its loss combines current normalized MLU with a future-failure stress term. The stress term keeps the learned final-step split fixed and evaluates single-link degradation scenarios on the final topology, using recent failure history to weight the expected degradation term. This objective is not a post-failure LP reoptimization; it is a differentiable way to bias the learned allocation toward routes that remain usable under likely near-future link degradation.
@@ -193,6 +202,15 @@ Worst failure & 4.1595 & 4.1149 & 4.3346 \\
 \hline
 \end{tabular}
 \end{center}
+
+Figure~\ref{fig:resilience-percentiles} breaks out the percentile profiles for the combined, current, expected-failure, and worst-failure metrics.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/dynamic_abilene/resilience_metric_percentiles.png}
+\caption{Percentile profiles for the three-way resilience evaluation. The resilient objective improves the expected-failure profile relative to vanilla temporal HARP, while vanilla temporal HARP remains strongest on current-step and worst-failure metrics under the default objective weights.}
+\label{fig:resilience-percentiles}
+\end{figure*}
 
 The three-way comparison shows a real tradeoff. Vanilla temporal HARP remains best on current MLU, worst-link degradation, and the default combined score. However, the resilient temporal checkpoint achieves the best expected future-failure metric: it improves expected-failure normalized MLU by 7.64\% over the snapshot baseline and by 1.43\% over vanilla temporal HARP. In exchange, it gives up about 1.08\% on current MLU relative to vanilla temporal HARP. This suggests that the resilience objective changes the learned allocation policy toward probability-weighted future-failure robustness rather than uniformly improving every MLU-derived metric.
 
@@ -217,9 +235,7 @@ Additional future work includes improving training stability, measuring inferenc
 GRATE investigates whether temporal structure in WAN demand matrices can improve ML-based traffic engineering. We built a temporal extension to HARP, generated dynamic Abilene temporal samples, solved final-timestep Gurobi optima, and evaluated a trained prototype. On 200 held-out dynamic Abilene samples, the corrected temporal model achieved average normalized MLU 1.0267, with no skipped samples and a worst-case normalized MLU of 1.1145. A matched snapshot-only HARP baseline achieved average normalized MLU 1.0837 on the same split, showing a modest but consistent current-MLU benefit from temporal history. Because both models are near-optimal under myopic MLU, future-failure robustness and other temporal metrics are the more promising direction for demonstrating the practical value of GRATE; the preliminary resilient-training result supports this direction by improving expected future-failure MLU while exposing a current-MLU tradeoff.
 
 {\footnotesize \bibliographystyle{acm}
-\bibliography{sample}}
+\bibliography{refs}}
 
-
-\theendnotes
 
 \end{document}
