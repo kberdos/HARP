@@ -21,7 +21,7 @@ python -c "import torch; print('torch:', torch.__version__); print('cuda availab
 python3 run_harp.py \
   --topo dynamic_abilene \
   --mode train \
-  --epochs 20 \
+  --epochs 5 \
   --lr 0.00005 \
   --batch_size 1 \
   --num_paths_per_pair 4 \
@@ -38,4 +38,5 @@ python3 run_harp.py \
   --dynamic_train_end_idx 800 \
   --dynamic_val_start_idx 800 \
   --dynamic_val_end_idx 1000 \
-  --use_dynamic_opt 1
+  --use_dynamic_opt 1 \
+  --split_loss_weight 5

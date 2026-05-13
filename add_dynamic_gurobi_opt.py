@@ -50,6 +50,12 @@ def solve_optimal_mlu(sample, k_paths, time_limit=None, verbose=False):
         x[p] >= 0
 
     Here demand[p] is repeated per path slot in the sample's tm.
+
+    Returns:
+        opt: scalar optimal MLU
+        opt_splits: [1, P] tensor of optimal path split ratios
+        status: Gurobi status
+        runtime: Gurobi runtime in seconds
     """
     tm, capacities, pte = get_final_sample_tensors(sample)
 
@@ -126,7 +132,17 @@ def solve_optimal_mlu(sample, k_paths, time_limit=None, verbose=False):
     if not math.isfinite(opt):
         raise RuntimeError(f"Optimal MLU is not finite: {opt}")
 
-    return opt, m.Status, float(m.Runtime)
+    opt_splits = torch.tensor([x[p].X for p in range(P)], dtype=torch.float32).view(1, P)
+
+    # Small numerical cleanup. Gurobi may return tiny negative/above-one values due to tolerances.
+    opt_splits = opt_splits.clamp(min=0.0, max=1.0)
+
+    # Renormalize each SD-pair group to sum to 1. This keeps the label compatible with softmax outputs.
+    opt_splits_grouped = opt_splits.view(1, num_pairs, k_paths)
+    denom = opt_splits_grouped.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    opt_splits = (opt_splits_grouped / denom).view(1, P)
+
+    return opt, opt_splits, m.Status, float(m.Runtime)
 
 
 def main():
@@ -158,15 +174,15 @@ def main():
     skipped = 0
     failed = 0
 
-    for fp in tqdm(files, desc="Adding Gurobi opt"):
+    for fp in tqdm(files, desc="Adding Gurobi opt + splits"):
         sample = load_sample(fp)
 
-        if "opt" in sample and not args.overwrite:
+        if "opt" in sample and "opt_splits" in sample and not args.overwrite:
             skipped += 1
             continue
 
         try:
-            opt, status, runtime = solve_optimal_mlu(
+            opt, opt_splits, status, runtime = solve_optimal_mlu(
                 sample=sample,
                 k_paths=args.k_paths,
                 time_limit=args.time_limit,
@@ -174,6 +190,7 @@ def main():
             )
 
             sample["opt"] = torch.tensor(opt, dtype=torch.float32)
+            sample["opt_splits"] = opt_splits
             sample["opt_status"] = int(status)
             sample["opt_runtime"] = float(runtime)
 
@@ -192,4 +209,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-  

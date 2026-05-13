@@ -275,6 +275,7 @@ class TunnelEncoder(nn.Module):
                 flat_inputs,
                 src_key_padding_mask=src_key_padding_mask,
             )
+
         flat_outputs = torch.nan_to_num(
             flat_outputs,
             nan=0.0,
@@ -408,8 +409,6 @@ class TunnelEncoder(nn.Module):
         final_path_edge_embeddings = set_outputs[:, :, -1, 1:, :]
 
         final_tm_pred = tm_pred[:, :, -1, :]
-
-
         mlp_inputs = torch.cat((final_path_embeddings, final_tm_pred), dim=-1)
 
         mlp_inputs = torch.nan_to_num(
@@ -688,13 +687,13 @@ class HARP(nn.Module):
             )
 
             dnn_2_inputs = torch.cat(
-            (
-                bottleneck_path_edge_embeddings,
-                max_utilization_per_path,
-                mlu,
-                tm_pred_final,
-            ),
-            dim=-1,
+                (
+                    bottleneck_path_edge_embeddings,
+                    max_utilization_per_path,
+                    mlu,
+                    tm_pred_final,
+                ),
+                dim=-1,
             )
 
             dnn_2_inputs = torch.nan_to_num(
@@ -720,7 +719,6 @@ class HARP(nn.Module):
             delta_gammas = delta_gammas.clamp(min=-50.0, max=50.0)
 
             gammas = gammas.reshape(batch_size, -1, 1)
-
             gammas = torch.nan_to_num(
                 gammas,
                 nan=0.0,
@@ -730,7 +728,6 @@ class HARP(nn.Module):
             gammas = gammas.clamp(min=-50.0, max=50.0)
 
             new_gammas = delta_gammas + gammas
-
             new_gammas = torch.nan_to_num(
                 new_gammas,
                 nan=0.0,
@@ -752,6 +749,14 @@ class HARP(nn.Module):
             num_paths_per_pair=num_paths_per_pair,
             add_epsilon=False,
         )
+
+        if getattr(props, "return_splits", False):
+            split_ratios = self.compute_split_ratios(
+                new_gammas,
+                batch_size,
+                num_paths_per_pair,
+            )
+            return edges_util, split_ratios
 
         return edges_util
 
@@ -1161,125 +1166,80 @@ class HARP(nn.Module):
         pte_info,
     ):
         """
-        Safer bottleneck-link lookup.
+        Args:
+            edge_utils:
+                [B, E_final]
 
-        Original HARP used torch_scatter over paths_to_edges, then tried to map
-        the scatter argmax back into padded_edge_ids_per_path. That is brittle
-        for dynamic topology because edge IDs/path padding can change per sample.
+            padded_edge_ids_per_path:
+                [P, L_final]
 
-        This version directly uses padded_edge_ids_per_path:
-
-            edge_utils: [B, E_final]
-            padded_edge_ids_per_path: [P, L_final], padded with -1
-            path_edge_embeddings: [B, P, Lmax, D]
+            path_edge_embeddings:
+                [B, P, Lmax, D]
 
         Returns:
-            bottleneck_path_edge_embeddings: [B, P, D]
-            max_utilization_per_path: [B, P, 1]
+            bottleneck_path_edge_embeddings:
+                [B, P, D]
+
+            max_utilization_per_path:
+                [B, P, 1]
         """
 
-        if padded_edge_ids_per_path.dim() != 2:
-            raise ValueError(
-                "padded_edge_ids_per_path must have shape [P, L]. "
-                f"Got {tuple(padded_edge_ids_per_path.shape)}"
-            )
+        paths_to_edges, row_indices, col_indices, values = pte_info
 
-        if edge_utils.dim() != 2:
-            raise ValueError(
-                "edge_utils must have shape [B, E]. "
-                f"Got {tuple(edge_utils.shape)}"
-            )
-
-        if path_edge_embeddings.dim() != 4:
-            raise ValueError(
-                "path_edge_embeddings must have shape [B, P, L, D]. "
-                f"Got {tuple(path_edge_embeddings.shape)}"
-            )
-
-        device = edge_utils.device
-
-        padded_edge_ids_per_path = padded_edge_ids_per_path.to(device=device)
-
-        P, L_final = padded_edge_ids_per_path.shape
-        B, E_final = edge_utils.shape
-        _, P_embed, L_embed, D = path_edge_embeddings.shape
-
-        if P != total_number_of_paths:
-            raise ValueError(
-                f"Path count mismatch: padded paths has P={P}, "
-                f"total_number_of_paths={total_number_of_paths}"
-            )
-
-        if P_embed != P:
-            raise ValueError(
-                f"Path embedding count mismatch: path_edge_embeddings has P={P_embed}, "
-                f"padded paths has P={P}"
-            )
-
-        if L_final > L_embed:
-            raise ValueError(
-                f"Final padded path length L_final={L_final} is larger than "
-                f"path_edge_embeddings length L_embed={L_embed}"
-            )
-
-        valid_mask = padded_edge_ids_per_path.ge(0)
-
-        safe_edge_ids = padded_edge_ids_per_path.clamp(min=0)
-
-        if safe_edge_ids.numel() > 0:
-            max_edge_id = int(safe_edge_ids.max().detach().cpu())
-            if max_edge_id >= E_final:
-                raise ValueError(
-                    f"padded_edge_ids_per_path contains edge id {max_edge_id}, "
-                    f"but edge_utils only has {E_final} edges."
-                )
-
-        # Gather edge utilization for every edge position in every path.
-        # edge_utils: [B, E]
-        # safe_edge_ids: [P, L]
-        # gathered_utils: [B, P, L]
-        gather_ids = safe_edge_ids.view(1, P, L_final).expand(B, -1, -1)
-        expanded_edge_utils = edge_utils.view(B, 1, E_final).expand(-1, P, -1)
-
-        gathered_utils = torch.gather(
-            expanded_edge_utils,
-            dim=2,
-            index=gather_ids,
+        max_utilization_per_path, max_indices = torch_scatter.scatter_max(
+            edge_utils[:, col_indices] * values,
+            row_indices,
+            dim=1,
+            dim_size=paths_to_edges.shape[0],
         )
-
-        # Ignore padded positions.
-        gathered_utils = gathered_utils.masked_fill(
-            ~valid_mask.view(1, P, L_final),
-            float("-inf"),
-        )
-
-        max_utilization_per_path, bottleneck_positions = gathered_utils.max(dim=2)
-
-        # Safety: if a path somehow has no valid edges, avoid indexing garbage.
-        no_valid_path = ~valid_mask.any(dim=1)
-
-        if no_valid_path.any():
-            bottleneck_positions = bottleneck_positions.masked_fill(
-                no_valid_path.view(1, P),
-                0,
-            )
-            max_utilization_per_path = max_utilization_per_path.masked_fill(
-                no_valid_path.view(1, P),
-                0.0,
-            )
-
-        # Gather the embedding at the bottleneck position.
-        # path_edge_embeddings: [B, P, L_embed, D]
-        batch_indices = torch.arange(B, device=device).view(B, 1).expand(B, P)
-        path_indices = torch.arange(P, device=device).view(1, P).expand(B, P)
-
-        bottleneck_path_edge_embeddings = path_edge_embeddings[
-            batch_indices,
-            path_indices,
-            bottleneck_positions,
-        ]
 
         max_utilization_per_path = max_utilization_per_path - epsilon
+
+        try:
+            max_indices = col_indices[max_indices]
+        except Exception:
+            print("max_indices.shape:", max_indices.shape)
+            print("max_indices.device:", max_indices.device)
+            print("max_indices.dtype:", max_indices.dtype)
+            print("max_indices contains NaN:", torch.isnan(max_indices).any().item())
+            print("max_indices contains Inf:", torch.isinf(max_indices).any().item())
+            print(max_indices.max())
+            print(col_indices.max())
+            print("Out of bound indexing!!")
+            exit(1)
+
+        max_indices_expanded = max_indices.unsqueeze(2).expand(
+            -1,
+            -1,
+            padded_edge_ids_per_path.size(1),
+        )
+
+        matches = max_indices_expanded == padded_edge_ids_per_path
+
+        try:
+            positions = torch.where(matches)
+        except Exception as e:
+            print(e)
+            print(edge_utils.max())
+            print("edge_utils contains NaN:", torch.isnan(edge_utils).any().item())
+            print("edge_utils contains Inf:", torch.isinf(edge_utils).any().item())
+            print(max_indices_expanded.shape, padded_edge_ids_per_path.shape)
+            print(max_indices_expanded.max())
+            print(padded_edge_ids_per_path.max())
+            print(matches.max())
+            print("Out of bound indexing!!")
+            exit(1)
+
+        positions = torch.stack(positions, dim=-1)
+        positions = positions.view(batch_size, total_number_of_paths, -1)
+
+        dim0_range = positions[:, :, 0].view(batch_size, total_number_of_paths, -1)
+        dim1_range = positions[:, :, 1].view(batch_size, total_number_of_paths, -1)
+        positions = positions[:, :, -1].view(batch_size, total_number_of_paths, -1)
+
+        bottleneck_path_edge_embeddings = (
+            path_edge_embeddings[dim0_range, dim1_range, positions]
+        ).squeeze(-2)
 
         return bottleneck_path_edge_embeddings, max_utilization_per_path.unsqueeze(-1)
 
@@ -1370,20 +1330,9 @@ class HARP(nn.Module):
         if props.dtype == torch.bfloat16:
             data_on_links = data_on_links.to(dtype=torch.bfloat16)
 
-        capacities = capacities.clamp_min(1e-6)
-
         if add_epsilon:
             edges_util = data_on_links / capacities + epsilon
         else:
             edges_util = data_on_links / capacities
-
-        edges_util = torch.nan_to_num(
-            edges_util,
-            nan=0.0,
-            posinf=1e6,
-            neginf=0.0,
-        )
-
-        edges_util = edges_util.clamp(min=0.0, max=1e6)
 
         return edges_util

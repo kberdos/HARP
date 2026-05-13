@@ -19,7 +19,7 @@ echo "Working dir: $(pwd)"
 python -c "import gurobipy as gp; print('gurobi ok', gp.gurobi.version())"
 
 python add_dynamic_gurobi_opt.py \
-  --samples_dir dynamic_abilene_h6_1000_samples \
+  --samples_dir dynamic_abilene_h1_1000_samples \
   --k_paths 4 \
   --start_idx 0 \
   --end_idx 1000 \

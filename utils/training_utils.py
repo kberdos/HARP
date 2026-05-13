@@ -36,17 +36,36 @@ def loss_mlu(y_pred_batch, y_true_batch):
     return ret, ret_val
 
 
-def dynamic_mlu_loss(predicted, sample, use_opt=True):
+def unpack_model_output(model_output):
+    """
+    Dynamic HARP can return either:
+        edges_util
+    or:
+        (edges_util, split_ratios)
+    """
+    if isinstance(model_output, tuple):
+        if len(model_output) != 2:
+            raise ValueError(f"Unexpected model output tuple length: {len(model_output)}")
+        return model_output[0], model_output[1]
+    return model_output, None
+
+
+def dynamic_mlu_loss(
+    predicted,
+    sample,
+    pred_splits=None,
+    use_opt=True,
+    split_loss_weight=0.0,
+):
     """
     Dynamic-sample loss.
 
     If sample["opt"] exists and use_opt=True:
         optimize normalized MLU = model_mlu / optimal_mlu.
 
-    If no opt exists:
-        optimize raw MLU, plus an anti-collapse term so the model cannot
-        make the loss look good by producing all-zero utilization while the
-        traffic matrix is nonzero.
+    If sample["opt_splits"] exists and split_loss_weight > 0:
+        add a supervised/distillation term that nudges predicted path split
+        ratios toward the Gurobi optimal path split ratios.
 
     Important:
         This function intentionally does NOT silently convert NaN/Inf predicted
@@ -55,6 +74,9 @@ def dynamic_mlu_loss(predicted, sample, use_opt=True):
     """
     if not torch.isfinite(predicted).all():
         raise RuntimeError("Non-finite predicted tensor reached dynamic_mlu_loss")
+
+    if pred_splits is not None and not torch.isfinite(pred_splits).all():
+        raise RuntimeError("Non-finite split tensor reached dynamic_mlu_loss")
 
     # Utilization should be nonnegative. Clamp tiny negative values that can
     # come from numerical weirdness, but do not hide NaN/Inf above.
@@ -84,12 +106,14 @@ def dynamic_mlu_loss(predicted, sample, use_opt=True):
     # Temporary no-Gurobi guardrail:
     # If there is real demand, total utilization should not be exactly zero.
     # This does not make the fallback objective perfect; it only prevents the
-    # degenerate all-zero solution while we add true Gurobi opt values later.
+    # degenerate all-zero solution when opt is not present.
     has_traffic = tm_final_sum > 1e-8
 
     zero_collapse_penalty = torch.where(
         has_traffic,
-        torch.relu(torch.tensor(1e-4, device=predicted.device, dtype=predicted.dtype) - total_util) * 1000.0,
+        torch.relu(
+            torch.tensor(1e-4, device=predicted.device, dtype=predicted.dtype) - total_util
+        ) * 1000.0,
         torch.tensor(0.0, device=predicted.device, dtype=predicted.dtype),
     )
 
@@ -100,7 +124,28 @@ def dynamic_mlu_loss(predicted, sample, use_opt=True):
         torch.tensor(0.0, device=predicted.device, dtype=predicted.dtype),
     )
 
-    loss = base_loss + anti_collapse_term + zero_collapse_penalty
+    split_loss = torch.tensor(0.0, device=predicted.device, dtype=predicted.dtype)
+
+    if split_loss_weight > 0.0:
+        opt_splits = sample.get("opt_splits", None)
+
+        if opt_splits is not None and pred_splits is not None:
+            opt_splits = opt_splits.to(device=pred_splits.device, dtype=pred_splits.dtype)
+
+            if opt_splits.dim() == 1:
+                opt_splits = opt_splits.unsqueeze(0)
+
+            if opt_splits.shape != pred_splits.shape:
+                opt_splits = opt_splits.reshape_as(pred_splits)
+
+            split_loss = torch.mean((pred_splits - opt_splits) ** 2)
+
+    loss = (
+        base_loss
+        + anti_collapse_term
+        + zero_collapse_penalty
+        + float(split_loss_weight) * split_loss
+    )
 
     if not torch.isfinite(loss):
         raise RuntimeError("Non-finite dynamic loss computed")
@@ -109,9 +154,16 @@ def dynamic_mlu_loss(predicted, sample, use_opt=True):
     raw_mlu_value = float(max_cong.detach().cpu())
     total_util_value = float(total_util.detach().cpu())
     tm_sum_value = float(tm_final_sum.detach().cpu())
+    split_loss_value = float(split_loss.detach().cpu())
 
-    return loss, loss_value, raw_mlu_value, total_util_value, tm_sum_value
-
+    return (
+        loss,
+        loss_value,
+        raw_mlu_value,
+        total_util_value,
+        tm_sum_value,
+        split_loss_value,
+    )
 
 class DynamicAbileneDataset(Dataset):
     """
@@ -127,6 +179,7 @@ class DynamicAbileneDataset(Dataset):
         tm_pred: [1, T, P, 1]
         metadata: optional dict
         opt: optional scalar optimal MLU for the final timestep
+        opt_splits: optional [1, P] optimal Gurobi split ratios
     """
 
     def __init__(self, samples_dir, start_idx=0, end_idx=None):
@@ -188,7 +241,7 @@ def move_dynamic_sample_to_device(sample, device, dtype):
             out[key] = [x.to(device=device, dtype=dtype) for x in value]
 
         elif torch.is_tensor(value):
-            if key in ["node_features", "tm", "tm_pred", "opt"]:
+            if key in ["node_features", "tm", "tm_pred", "opt", "opt_splits"]:
                 out[key] = value.to(device=device, dtype=dtype)
             else:
                 out[key] = value.to(device=device)
@@ -205,19 +258,28 @@ def run_model_on_dynamic_sample(model, props, sample):
 
     The HARP dynamic branch is triggered because edge_index/capacities/
     padded_edge_ids_per_path/paths_to_edges are lists over time.
+
+    Dynamic training asks HARP to return both edge utilizations and path split
+    ratios so we can optionally add a Gurobi split imitation loss.
     """
-    return model(
-        props,
-        sample["node_features"],
-        sample["edge_index"],
-        sample["capacities"],
-        sample["padded_edge_ids_per_path"],
-        sample["tm"],
-        sample["tm_pred"] if props.pred else sample["tm"],
-        sample["paths_to_edges"],
-        None,
-        None,
-    )
+    old_return_splits = getattr(props, "return_splits", False)
+    props.return_splits = True
+
+    try:
+        return model(
+            props,
+            sample["node_features"],
+            sample["edge_index"],
+            sample["capacities"],
+            sample["padded_edge_ids_per_path"],
+            sample["tm"],
+            sample["tm_pred"] if props.pred else sample["tm"],
+            sample["paths_to_edges"],
+            None,
+            None,
+        )
+    finally:
+        props.return_splits = old_return_splits
 
 
 def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
@@ -232,7 +294,8 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
 
             optimizer.zero_grad(set_to_none=True)
 
-            predicted = run_model_on_dynamic_sample(model, props, sample)
+            model_output = run_model_on_dynamic_sample(model, props, sample)
+            predicted, pred_splits = unpack_model_output(model_output)
 
             # Do not let bad outputs get silently converted to zero.
             if not torch.isfinite(predicted).all():
@@ -241,10 +304,19 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
                 continue
 
             try:
-                loss, loss_value, raw_mlu_value, total_util_value, tm_sum_value = dynamic_mlu_loss(
+                (
+                    loss,
+                    loss_value,
+                    raw_mlu_value,
+                    total_util_value,
+                    tm_sum_value,
+                    split_loss_value,
+                ) = dynamic_mlu_loss(
                     predicted,
                     sample,
+                    pred_splits=pred_splits,
                     use_opt=getattr(props, "use_dynamic_opt", True),
+                    split_loss_weight=getattr(props, "split_loss_weight", 0.0),
                 )
             except RuntimeError as exc:
                 skipped += 1
@@ -267,6 +339,7 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
                 raw_mlu=raw_mlu_value,
                 total_util=total_util_value,
                 tm_sum=tm_sum_value,
+                split_loss=split_loss_value,
                 skipped=skipped,
             )
 
@@ -287,7 +360,8 @@ def validate_dynamic(model, props, val_dl):
             for sample in vals:
                 sample = move_dynamic_sample_to_device(sample, props.device, props.dtype)
 
-                predicted = run_model_on_dynamic_sample(model, props, sample)
+                model_output = run_model_on_dynamic_sample(model, props, sample)
+                predicted, pred_splits = unpack_model_output(model_output)
 
                 if not torch.isfinite(predicted).all():
                     skipped += 1
@@ -295,10 +369,19 @@ def validate_dynamic(model, props, val_dl):
                     continue
 
                 try:
-                    loss, loss_value, raw_mlu_value, total_util_value, tm_sum_value = dynamic_mlu_loss(
+                    (
+                        loss,
+                        loss_value,
+                        raw_mlu_value,
+                        total_util_value,
+                        tm_sum_value,
+                        split_loss_value,
+                    ) = dynamic_mlu_loss(
                         predicted,
                         sample,
+                        pred_splits=pred_splits,
                         use_opt=getattr(props, "use_dynamic_opt", True),
+                        split_loss_weight=getattr(props, "split_loss_weight", 0.0),
                     )
                 except RuntimeError as exc:
                     skipped += 1
@@ -317,6 +400,7 @@ def validate_dynamic(model, props, val_dl):
                     raw_mlu=raw_mlu_value,
                     total_util=total_util_value,
                     tm_sum=tm_sum_value,
+                    split_loss=split_loss_value,
                     skipped=skipped,
                 )
 
@@ -338,7 +422,8 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
                 for sample in tests:
                     sample = move_dynamic_sample_to_device(sample, props.device, props.dtype)
 
-                    predicted = run_model_on_dynamic_sample(model, props, sample)
+                    model_output = run_model_on_dynamic_sample(model, props, sample)
+                    predicted, pred_splits = unpack_model_output(model_output)
 
                     if not torch.isfinite(predicted).all():
                         skipped += 1
@@ -346,10 +431,19 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
                         continue
 
                     try:
-                        loss, loss_value, raw_mlu_value, total_util_value, tm_sum_value = dynamic_mlu_loss(
+                        (
+                            loss,
+                            loss_value,
+                            raw_mlu_value,
+                            total_util_value,
+                            tm_sum_value,
+                            split_loss_value,
+                        ) = dynamic_mlu_loss(
                             predicted,
                             sample,
+                            pred_splits=pred_splits,
                             use_opt=getattr(props, "use_dynamic_opt", True),
+                            split_loss_weight=getattr(props, "split_loss_weight", 0.0),
                         )
                     except RuntimeError as exc:
                         skipped += 1
@@ -369,6 +463,7 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
                         raw_mlu=raw_mlu_value,
                         total_util=total_util_value,
                         tm_sum=tm_sum_value,
+                        split_loss=split_loss_value,
                         skipped=skipped,
                     )
 

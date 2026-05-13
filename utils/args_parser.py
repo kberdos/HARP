@@ -52,13 +52,21 @@ def add_default_args(parser):
     parser.add_argument("--dynamic_test_start_idx", type=int, default=0)
     parser.add_argument("--dynamic_test_end_idx", type=int, default=None)
 
-    # If dynamic samples later include sample["opt"], this controls whether to use it.
+    # If dynamic samples include sample["opt"], this controls whether to use it.
     parser.add_argument("--use_dynamic_opt", type=int, default=1)
+
+    # Optional Gurobi split imitation / distillation loss.
+    # Requires sample["opt_splits"] from add_dynamic_gurobi_opt.py.
+    parser.add_argument("--split_loss_weight", type=float, default=0.0)
 
     # Temporal-HARP extra args used by harp_system.py
     parser.add_argument("--use_temporal_cls", type=int, default=1)
     parser.add_argument("--use_temporal_residual", type=int, default=1)
     parser.add_argument("--temporal_recency_alpha", type=float, default=0.1)
+
+    # Internal/debug flag. Dynamic training_utils turns this on so HARP returns
+    # both edge utilizations and predicted path split ratios.
+    parser.add_argument("--return_splits", type=int, default=0)
 
     return parser
 
@@ -78,5 +86,6 @@ def parse_args(args):
     args_.use_dynamic_opt = bool(args_.use_dynamic_opt)
     args_.use_temporal_cls = bool(args_.use_temporal_cls)
     args_.use_temporal_residual = bool(args_.use_temporal_residual)
+    args_.return_splits = bool(args_.return_splits)
 
     return args_
