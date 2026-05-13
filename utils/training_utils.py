@@ -15,6 +15,22 @@ def move_to_device(dictionary, device="cpu"):
     return dictionary
 
 
+def find_first_nonfinite_parameter(model):
+    for name, param in model.named_parameters():
+        if not torch.isfinite(param).all():
+            return name
+
+    return None
+
+
+def find_first_nonfinite_gradient(model):
+    for name, param in model.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all():
+            return name
+
+    return None
+
+
 def loss_mlu(y_pred_batch, y_true_batch):
     losses = []
     loss_vals = []
@@ -230,6 +246,13 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
         for sample in tepoch:
             sample = move_dynamic_sample_to_device(sample, props.device, props.dtype)
 
+            bad_param = find_first_nonfinite_parameter(model)
+            if bad_param is not None:
+                raise RuntimeError(
+                    f"Non-finite model parameter before forward: {bad_param}. "
+                    "The checkpoint is poisoned and would collapse to uniform splits."
+                )
+
             optimizer.zero_grad(set_to_none=True)
 
             predicted = run_model_on_dynamic_sample(model, props, sample)
@@ -257,8 +280,26 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
                 continue
 
             loss.backward()
+
+            bad_grad = find_first_nonfinite_gradient(model)
+            if bad_grad is not None:
+                skipped += 1
+                optimizer.zero_grad(set_to_none=True)
+                print(
+                    "[WARN] Non-finite gradient detected for "
+                    f"{bad_grad}. Skipping optimizer step."
+                )
+                continue
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            bad_param = find_first_nonfinite_parameter(model)
+            if bad_param is not None:
+                raise RuntimeError(
+                    f"Optimizer step produced non-finite parameter: {bad_param}. "
+                    "Lower the learning rate or enable a more stable loss/architecture."
+                )
 
             loss_values.append(loss_value)
             avg_loss = sum(loss_values) / len(loss_values)
@@ -286,6 +327,13 @@ def validate_dynamic(model, props, val_dl):
 
             for sample in vals:
                 sample = move_dynamic_sample_to_device(sample, props.device, props.dtype)
+
+                bad_param = find_first_nonfinite_parameter(model)
+                if bad_param is not None:
+                    raise RuntimeError(
+                        f"Non-finite model parameter during validation: {bad_param}. "
+                        "Refusing to report equal-split metrics from a poisoned checkpoint."
+                    )
 
                 predicted = run_model_on_dynamic_sample(model, props, sample)
 
@@ -337,6 +385,13 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
             with open(values_path, "w") as values_file:
                 for sample in tests:
                     sample = move_dynamic_sample_to_device(sample, props.device, props.dtype)
+
+                    bad_param = find_first_nonfinite_parameter(model)
+                    if bad_param is not None:
+                        raise RuntimeError(
+                            f"Non-finite model parameter during test: {bad_param}. "
+                            "Refusing to report equal-split metrics from a poisoned checkpoint."
+                        )
 
                     predicted = run_model_on_dynamic_sample(model, props, sample)
 
