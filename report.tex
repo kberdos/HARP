@@ -45,7 +45,7 @@ Brown University
 
 
 \begin{abstract}
-GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We implemented a temporal extension to the HARP codebase that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 4.3037 over 200 held-out samples. These results show that the temporal pipeline is implemented end-to-end, but they do not yet validate the core hypothesis that temporal demand history improves over a memoryless baseline.
+GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We implemented a temporal extension to the HARP codebase that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, with a 95th percentile of 1.0531 and no skipped samples. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations very close to the LP optimum on this dynamic Abilene split, although a matched memoryless baseline is still needed to isolate the contribution of temporal history.
 \end{abstract}
 
 \section{Introduction}
@@ -127,7 +127,7 @@ We generated a 1000-sample dynamic Abilene dataset with six-timestep histories a
 
 We added Gurobi optimal MLU labels to all 1000 generated samples. In the local dataset, every sample had an optimal label and every Gurobi solve returned optimal status. Across the dataset, the optimal MLU labels had mean 0.4489, median 0.4210, minimum 0.2952, and maximum 3.2943.
 
-The temporal HARP prototype was trained for 20 epochs with learning rate 0.00005, two Transformer layers, three GNN layers, three RAU-style refinement loops, and dynamic optimal labels. Samples 0--800 were used for training and samples 800--1000 for validation. The dynamic dataloader currently requires batch size 1 because samples may have different edge counts or path lengths.
+The temporal HARP prototype was trained for 20 epochs with learning rate 0.00005, two Transformer layers, three GNN layers, three RAU-style refinement loops, and dynamic optimal labels. Samples 0--800 were used for training and samples 800--1000 for validation and testing. The dynamic dataloader currently requires batch size 1 because samples may have different edge counts or path lengths.
 
 \begin{verbatim}
 train_dynamic_abilene.sh
@@ -142,33 +142,35 @@ dynamic optimal labels: enabled
 
 \section{Results}
 
-We evaluated the trained temporal prototype on held-out samples 800--1000 from the dynamic Abilene dataset. The reported metric is normalized MLU, computed as model MLU divided by the Gurobi optimal MLU for the final timestep. Lower is better, and an LP-optimal solution would have normalized MLU 1.0.
+We evaluated the trained temporal prototype on held-out samples 800--1000 from the dynamic Abilene dataset. The reported metric is normalized MLU, computed as model MLU divided by the Gurobi optimal MLU for the final timestep. Lower is better, and an LP-optimal solution would have normalized MLU 1.0. After fixing the temporal path encoder's padding-mask handling and retraining from scratch, the model converged to near-optimal routing allocations on this split.
 
 \begin{center}
 \begin{tabular}{lr}
 \hline
 Metric & Value \\
 \hline
-Average normalized MLU & 4.3037 \\
-Median normalized MLU & 4.4837 \\
-25th percentile & 4.2914 \\
-75th percentile & 4.6303 \\
-90th percentile & 4.7262 \\
-95th percentile & 4.8081 \\
-99th percentile & 4.9247 \\
-Maximum & 5.1206 \\
+Average normalized MLU & 1.0267 \\
+Median normalized MLU & 1.0265 \\
+25th percentile & 1.0167 \\
+75th percentile & 1.0337 \\
+90th percentile & 1.0435 \\
+95th percentile & 1.0531 \\
+99th percentile & 1.1052 \\
+Maximum & 1.1145 \\
 Skipped samples & 0 \\
 \hline
 \end{tabular}
 \end{center}
 
-These results demonstrate that the temporal data generation, Gurobi labeling, model training, and dynamic test pipeline run end-to-end. However, the measured normalized MLU is still far from the LP optimum. Because we have not yet completed a matched memoryless snapshot baseline under the same dynamic Abilene split, the current experiment does not establish whether temporal history improves over memoryless HARP or TEAL-style inputs.
+The final epoch produced a training average normalized MLU of 1.0206 and a validation/test average of 1.0267. The close train/test values suggest that the model did not simply memorize the training samples. The tail behavior is also encouraging: the 95th percentile is only 1.0531 and the worst held-out sample is 1.1145, meaning the learned policy stayed close to the Gurobi optimum across the full 200-sample evaluation slice.
+
+As a debugging reference point, before correcting the padding-mask handling in the temporal path encoder, the saved model collapsed to uniform path splits and produced an average normalized MLU of approximately 4.3037 on the same held-out slice. The corrected result therefore reflects an actual learned routing policy rather than an equal-split fallback. Because we have not yet completed a matched memoryless snapshot baseline under the same dynamic Abilene split, the current experiment still does not establish how much of the performance gain comes specifically from temporal history rather than from the HARP-style architecture and corrected training path.
 
 \section{Discussion and Future Work}
 
 For future work, we also wonder to what extent the centralized nature of control schemes for WAN networks like TEAL and HARP introduce single-point-of-failure risks. Can we explore a distributed control mechanism with more limited coordination between agents and still achieve comparable results? It is important to note that this question is more exploratory than the previous, since we recognize the inherent benefits of using centralized controllers for TE and the difficulties of moving away from them.
 
-The main lesson from the implementation is that temporal demand-aware HARP requires more than simply adding a Transformer over time. The prototype now carries temporal tensors through the HARP data path, handles list-valued dynamic topologies, pads path lengths across timesteps, and uses the final timestep for LP labels and edge-utilization evaluation. This gives us the infrastructure needed to test the GRATE idea rigorously.
+The main lesson from the implementation is that temporal demand-aware HARP requires more than simply adding a Transformer over time. The prototype now carries temporal tensors through the HARP data path, handles list-valued dynamic topologies, pads path lengths across timesteps, and uses the final timestep for LP labels and edge-utilization evaluation. We also found that correct padding-mask semantics are critical: an inverted mask can make the path encoder attend to padding rather than valid path edges, poisoning gradients and reducing the model to uniform splitting. With this corrected, the temporal prototype reached near-optimal MLU on held-out dynamic Abilene samples.
 
 The main limitation is experimental: the current result is an end-to-end prototype result, not a clean comparison against memoryless baselines. The next step is to train and evaluate a snapshot-only model on the same final timesteps, with the same paths, capacities, and Gurobi labels, so that we can isolate the effect of temporal history. We should also run ablations for the temporal CLS token, residual connection, recency weighting, history length, and number of RAU iterations.
 
@@ -182,7 +184,7 @@ Additional future work includes improving training stability, measuring inferenc
 
 \section{Conclusion}
 
-GRATE investigates whether temporal structure in WAN demand matrices can improve ML-based traffic engineering. We built a temporal extension to HARP, generated dynamic Abilene temporal samples, solved final-timestep Gurobi optima, and evaluated a trained prototype. The current result shows a functioning temporal pipeline but does not yet support the hypothesis that temporal history improves TE quality, because a matched memoryless baseline remains to be completed.
+GRATE investigates whether temporal structure in WAN demand matrices can improve ML-based traffic engineering. We built a temporal extension to HARP, generated dynamic Abilene temporal samples, solved final-timestep Gurobi optima, and evaluated a trained prototype. On 200 held-out dynamic Abilene samples, the corrected temporal model achieved average normalized MLU 1.0267, with no skipped samples and a worst-case normalized MLU of 1.1145. This demonstrates that the end-to-end temporal HARP pipeline can learn routing allocations close to LP-optimal on the generated dynamic Abilene workload. A matched memoryless baseline remains the key missing comparison needed to attribute this performance specifically to temporal history.
 
 {\footnotesize \bibliographystyle{acm}
 \bibliography{sample}}
@@ -191,4 +193,3 @@ GRATE investigates whether temporal structure in WAN demand matrices can improve
 \theendnotes
 
 \end{document}
-
