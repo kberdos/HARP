@@ -346,6 +346,217 @@ harp_resilient_<model_type>_dynamic_failure_id_None_worst_failure_*.txt
 
 These files are written under `results/dynamic_abilene/4sp/0/` by default.
 
+### Five-model Dynamic Abilene Resilience Comparison
+
+To compare HARP, DOTE, and Teal on the same HARP dynamic Abilene samples, run:
+
+```bash
+python3 scripts/compare_all_five_dynamic_abilene.py
+```
+
+This writes detailed distributions and a CSV summary under:
+
+```text
+results/dynamic_abilene/4sp/0/resilience_compare_all_five/
+```
+
+The comparison uses the same held-out dynamic Abilene slice `[800, 1000)` and
+the same future-failure resilience objective as the three-way HARP comparison:
+
+```text
+combined =
+  1.0 * current_norm
+  + 0.25 * (0.5 * expected_failure_norm + 0.5 * worst_failure_norm)
+```
+
+Implementation details:
+
+- The three HARP rows are copied from the existing
+  `resilience_compare_all/` evaluator outputs for the same 200-sample held-out
+  slice.
+- The DOTE row uses the DOTE MAXUTIL MLP architecture unchanged: four hidden
+  layers of width 128 with ReLU activations and a sigmoid path-weight head.
+  The data adapter changes only the input/output dimensions to match HARP's
+  12-node, 132-commodity, 4-path dynamic Abilene samples. It trains on
+  `[0, 800)` and evaluates on `[800, 1000)`.
+- The Teal row uses the Teal FlowGNN actor structure unchanged: six alternating
+  graph/DNN layers and the Teal path-action head. The HARP adapter supplies
+  each sample's final topology graph and maps the actor's per-commodity path
+  logits to full path splits over HARP's four paths per commodity. It also
+  trains on `[0, 800)` and evaluates on `[800, 1000)`.
+- No DOTE or Teal repository model source files are changed. The adapter
+  checkpoints are HARP-owned files:
+
+```text
+results/dynamic_abilene/4sp/0/resilience_compare_all_five/models/dote_harp_dynamic.pt
+results/dynamic_abilene/4sp/0/resilience_compare_all_five/models/teal_harp_dynamic.pt
+```
+
+Observed five-model results on the 200-sample dynamic Abilene held-out slice:
+
+```text
+Average normalized metrics. Lower is better.
+
+model                 combined    current    expected_failure    worst_failure
+vanilla_temporal       1.835491   1.028735            2.339113          4.114938
+resilient_temporal     1.848040   1.039879            2.305775          4.159516
+snapshot_baseline      1.937549   1.083662            2.496445          4.334649
+dote_adapter           2.056219   1.154477            2.596030          4.617908
+teal_adapter           4.772942   2.747234            5.216726         10.988937
+```
+
+Percentile details:
+
+```text
+model                 metric              average     median        p95        max
+vanilla_temporal      combined           1.835491   1.842293   1.889381   2.011178
+vanilla_temporal      current            1.028735   1.028435   1.055192   1.117073
+vanilla_temporal      expected_failure   2.339113   2.376451   2.520195   2.801129
+vanilla_temporal      worst_failure      4.114938   4.113741   4.220767   4.468291
+
+resilient_temporal    combined           1.848040   1.842995   1.986221   2.062167
+resilient_temporal    current            1.039879   1.031396   1.118162   1.202261
+resilient_temporal    expected_failure   2.305775   2.340888   2.521950   2.729110
+resilient_temporal    worst_failure      4.159516   4.125583   4.472648   4.809043
+
+snapshot_baseline     combined           1.937549   1.943837   2.106518   2.292293
+snapshot_baseline     current            1.083662   1.083930   1.172289   1.279974
+snapshot_baseline     expected_failure   2.496445   2.541710   2.727249   3.062903
+snapshot_baseline     worst_failure      4.334649   4.335719   4.689154   5.119896
+
+dote_adapter          combined           2.056219   2.005457   2.549250   3.508076
+dote_adapter          current            1.154477   1.114250   1.485434   2.110486
+dote_adapter          expected_failure   2.596030   2.610985   2.882881   3.519255
+dote_adapter          worst_failure      4.617908   4.457002   5.941737   8.441945
+
+teal_adapter          combined           4.772942   4.718507   7.004472   9.006591
+teal_adapter          current            2.747234   2.701462   4.128419   5.417578
+teal_adapter          expected_failure   5.216726   5.311987   6.281948   8.237237
+teal_adapter          worst_failure     10.988937  10.805847  16.513678  21.670313
+```
+
+Interpretation:
+
+- The two temporal HARP models remain the strongest under this shared dynamic
+  Abilene evaluation. Vanilla temporal HARP has the best `combined`,
+  `current`, and `worst_failure` averages; resilient temporal HARP has the
+  best `expected_failure` average.
+- The snapshot-only HARP baseline is still stronger than the DOTE and Teal
+  adapters on every reported metric, but DOTE remains reasonably close on
+  current MLU: average `current` is 1.1545 versus 1.0837 for the snapshot
+  baseline.
+- The DOTE adapter improves substantially over a generic equal-split behavior
+  and lands fourth overall. Its main weakness is tail robustness: p95
+  `worst_failure` rises to 5.9417, compared with 4.6892 for the snapshot
+  baseline and 4.2208 for vanilla temporal HARP.
+- The Teal adapter performs poorly on this dynamic Abilene setup. This is
+  consistent with the fact that Teal's original implementation assumes a
+  static topology and was not designed for changing final-step edge sets. The
+  adapter preserves the FlowGNN actor structure, but supplying a new final
+  topology per sample is a harder transfer setting than Teal's native B4
+  evaluation.
+- This five-model table supersedes the older cross-repository stress sanity
+  check below when the question is "how do all models compare on HARP dynamic
+  Abilene?" The older section is still useful for documenting the raw DOTE and
+  Teal artifacts in their own native datasets.
+
+### DOTE and Teal Under the Same Resiliency Metric
+
+This fork also includes a HARP-owned cross-baseline evaluator for applying the
+same future-failure resiliency metric to the DOTE and Teal artifacts produced
+in the sibling repositories:
+
+```bash
+source ../DOTE/activate_dote.sh
+python3 scripts/evaluate_dote_teal_resilience.py
+```
+
+The evaluator writes only under HARP:
+
+```text
+results/cross_baselines_resilience/
+```
+
+It does not write result summaries into the DOTE or Teal repositories. The
+script computes the same four distributions as the HARP resiliency runner:
+`combined`, `current`, `expected_failure`, and `worst_failure`.
+
+Important comparison caveats:
+
+- These are stress evaluations of each system on the data already available in
+  its own repository, not a single shared dataset.
+- DOTE is evaluated on the synthetic Abilene test split generated in
+  `DOTE/networking_envs/data/Abilene/test/4.hist`, using the trained
+  MAXUTIL checkpoint `model_dote.pkl`. There are 2,015 one-step predictions
+  because the model uses `hist_len=1`.
+- Teal is evaluated on B4 real test seeds 28-35, using the Teal
+  `min_max_link_util` solution matrices generated by:
+
+```bash
+cd ../teal/run
+source ../activate_teal.sh
+python teal.py --obj min_max_link_util --topo B4.json --epochs 3 --admm-steps 2 --model-save True
+```
+
+- DOTE and Teal do not carry HARP dynamic failure metadata
+  `sample["metadata"]["failed_by_t"]`. For these cross-baseline runs, the
+  HARP risk prior therefore reduces to a uniform probability distribution over
+  single directed-link degradation scenarios.
+- The stress settings match the default HARP resiliency objective:
+  `current_weight=1.0`, `resilience_weight=0.25`,
+  `worst_case_weight=0.5`, and `failure_capacity_fraction=0.25`.
+- The reported normalization denominator is the current no-failure MLU
+  optimum. For DOTE, this uses the `.opt` values generated for its synthetic
+  Abilene split. For Teal, the evaluator solves a path-based min-MLU LP over
+  Teal's B4 4-path set for each tested traffic matrix.
+
+Observed cross-baseline stress results:
+
+```text
+Average normalized metrics. Lower is better.
+
+model                         samples    combined    current    expected_failure    worst_failure
+DOTE Abilene MAXUTIL             2015    2.134656   1.124135            3.587632          4.496538
+Teal B4 min_max_link_util           8    2.634879   1.575543            2.172515          6.302173
+```
+
+Percentile details:
+
+```text
+DOTE Abilene MAXUTIL, n=2015
+metric              average     median        p95        max
+combined           2.134656   2.124925   2.302757   2.580975
+current            1.124135   1.116434   1.232125   1.392996
+expected_failure   3.587632   3.606223   3.821072   3.985908
+worst_failure      4.496538   4.465737   4.928499   5.571984
+
+Teal B4 min_max_link_util, n=8
+metric              average     median        p95        max
+combined           2.634879   2.659699   2.751992   2.751992
+current            1.575543   1.593583   1.648577   1.648577
+expected_failure   2.172515   2.175563   2.233015   2.233015
+worst_failure      6.302173   6.374334   6.594307   6.594307
+```
+
+Interpretation:
+
+- DOTE's synthetic Abilene MAXUTIL checkpoint has a much better current
+  normalized MLU on its own held-out split than Teal has on B4 under this Teal
+  run: 1.1241 vs 1.5755. Because the datasets and topologies differ, this is
+  not a head-to-head quality ranking.
+- Teal's B4 allocations have lower probability-weighted expected degradation
+  than DOTE's synthetic Abilene allocations under the uniform-prior stress
+  calculation: 2.1725 vs 3.5876.
+- Teal's worst single-link degradation is higher: 6.3022 vs 4.4965. This
+  suggests that the tested Teal allocation is vulnerable to a smaller set of
+  high-impact bottleneck degradations even though its average degradation over
+  all links is lower.
+- Under the default combined HARP resilience weights, DOTE's evaluated
+  checkpoint has the lower combined value on its own split: 2.1347 vs 2.6349.
+  This result should be read as a stress-test sanity check across existing
+  artifacts, not as an apples-to-apples replacement for evaluating all models
+  on the same dynamic HARP samples.
+
 ## Reproduce Single-link Failure Experiments on Abilene and GEANT
 - After training HARP model on GEANT and Abilene, run:
   - ``python3 run_failures.py --topo geant --num_paths_per_pair 8 --num_for_loops X --test_start_idx start --test_end_idx end --pred 0 --test_cluster 0``
