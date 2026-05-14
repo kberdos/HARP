@@ -45,7 +45,7 @@ Brown University
 
 
 \begin{abstract}
-GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We implemented a temporal extension to the HARP codebase that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, compared with 1.0837 for a snapshot-only HARP baseline trained and evaluated on the same final timesteps. A resilience-trained temporal checkpoint improved probability-weighted expected future-failure MLU over both baselines, at a small cost to current-step MLU. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations close to the LP optimum on this dynamic Abilene split, while also motivating robustness-oriented metrics beyond myopic current-step MLU.
+GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We implemented a temporal extension to the HARP codebase that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, compared with 1.0837 for a snapshot-only HARP baseline trained and evaluated on the same final timesteps. A resilience-trained temporal checkpoint improved probability-weighted expected future-failure MLU over both baselines, at a small cost to current-step MLU. In an adapted five-model comparison on the same held-out samples, temporal HARP remained strongest on current MLU and the default combined resilience metric, while DOTE was the closest non-HARP baseline and TEAL struggled in this dynamic-topology setting. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations close to the LP optimum on this dynamic Abilene split, while also motivating robustness-oriented metrics beyond myopic current-step MLU.
 \end{abstract}
 
 \section{Introduction}
@@ -214,6 +214,40 @@ Figure~\ref{fig:resilience-percentiles} breaks out the percentile profiles for t
 
 The three-way comparison shows a real tradeoff. Vanilla temporal HARP remains best on current MLU, worst-link degradation, and the default combined score. However, the resilient temporal checkpoint achieves the best expected future-failure metric: it improves expected-failure normalized MLU by 7.64\% over the snapshot baseline and by 1.43\% over vanilla temporal HARP. In exchange, it gives up about 1.08\% on current MLU relative to vanilla temporal HARP. This suggests that the resilience objective changes the learned allocation policy toward probability-weighted future-failure robustness rather than uniformly improving every MLU-derived metric.
 
+We then extended the comparison to include DOTE and TEAL under the same dynamic Abilene held-out slice and the same MLU-resilience evaluator. These rows should be read as HARP-data adapters rather than exact reproductions of the original papers' native experimental setups: the DOTE row uses the MAXUTIL multilayer perceptron with input and output dimensions changed for the 12-node, 4-path Abilene samples, while the TEAL row uses the FlowGNN actor structure with each sample's final topology graph. Both adapters were trained on samples 0--800 and evaluated on samples 800--1000, matching the HARP split.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\hline
+Model & Current & Combined & Exp. fail. & Worst fail. \\
+\hline
+Vanilla temporal & 1.0287 & 1.8355 & 2.3391 & 4.1149 \\
+Resilient temporal & 1.0399 & 1.8480 & 2.3058 & 4.1595 \\
+Snapshot HARP & 1.0837 & 1.9375 & 2.4964 & 4.3346 \\
+DOTE adapter & 1.1545 & 2.0562 & 2.5960 & 4.6179 \\
+TEAL adapter & 2.7472 & 4.7729 & 5.2167 & 10.9889 \\
+\hline
+\end{tabular}
+\end{center}
+
+Figure~\ref{fig:all-five-current-mlu-percentiles} shows the current-step MLU percentile profile for all five models. The ordering is consistent with the averages: vanilla temporal HARP has the lowest current MLU, resilient temporal HARP gives up a small amount of current performance, snapshot HARP remains close, DOTE is weaker but still within a plausible range, and TEAL is far behind on this shared dynamic-topology evaluation.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/dynamic_abilene/all_five_current_normalized_mlu_percentiles.png}
+\caption{Held-out normalized current-step MLU percentiles for the five-model dynamic Abilene comparison. All models are evaluated on the same 200 samples and normalized by the same final-step Gurobi optima.}
+\label{fig:all-five-current-mlu-percentiles}
+\end{figure*}
+
+Figure~\ref{fig:all-five-resilience-percentiles} shows the same five-model comparison for the resilience metrics. The HARP variants dominate the combined and worst-failure metrics. DOTE is the closest non-HARP baseline, but its upper-tail degradation is noticeably higher than snapshot HARP. TEAL performs poorly here, which is consistent with the fact that the adapted evaluation changes the final topology from sample to sample; this is a harder transfer setting than TEAL's original static-topology workflow.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.92\textwidth]{figures/dynamic_abilene/all_five_resilience_metric_percentiles.png}
+\caption{Five-model percentile profiles for the combined, current, expected-failure, and worst-failure metrics on dynamic Abilene. Lower is better for all metrics.}
+\label{fig:all-five-resilience-percentiles}
+\end{figure*}
+
 \section{Discussion and Future Work}
 
 For future work, we also wonder to what extent the centralized nature of control schemes for WAN networks like TEAL and HARP introduce single-point-of-failure risks. Can we explore a distributed control mechanism with more limited coordination between agents and still achieve comparable results? It is important to note that this question is more exploratory than the previous, since we recognize the inherent benefits of using centralized controllers for TE and the difficulties of moving away from them.
@@ -222,7 +256,7 @@ The main lesson from the implementation is that temporal demand-aware HARP requi
 
 The main limitation is experimental: current-step normalized MLU may be too narrow a metric to expose the full value of temporal information. The snapshot-only HARP baseline is already close to optimal on this split, so the average current-MLU improvement from temporal history is real but modest. The preliminary resilience experiment supports this concern: changing the objective improves expected future-failure MLU, but does not uniformly improve current MLU or worst-case degradation. Next steps include sweeping the resilience weight and worst-case weight, evaluating routing churn and latency-oriented metrics, and running ablations for the temporal CLS token, residual connection, recency weighting, history length, and number of RAU iterations.
 
-Additional future work includes improving training stability, measuring inference latency, testing on GEANT or KDL in addition to Abilene, comparing against DOTE/TEAL-style prediction-aware baselines where feasible, and evaluating the centralized-controller failure question separately from the temporal-demand question.
+Additional future work includes improving training stability, measuring inference latency, testing on GEANT or KDL in addition to Abilene, building more faithful DOTE and TEAL reproductions for dynamic topologies, and evaluating the centralized-controller failure question separately from the temporal-demand question.
 
 \section{Project Member Contributions}
 
@@ -232,7 +266,7 @@ Additional future work includes improving training stability, measuring inferenc
 
 \section{Conclusion}
 
-GRATE investigates whether temporal structure in WAN demand matrices can improve ML-based traffic engineering. We built a temporal extension to HARP, generated dynamic Abilene temporal samples, solved final-timestep Gurobi optima, and evaluated a trained prototype. On 200 held-out dynamic Abilene samples, the corrected temporal model achieved average normalized MLU 1.0267, with no skipped samples and a worst-case normalized MLU of 1.1145. A matched snapshot-only HARP baseline achieved average normalized MLU 1.0837 on the same split, showing a modest but consistent current-MLU benefit from temporal history. Because both models are near-optimal under myopic MLU, future-failure robustness and other temporal metrics are the more promising direction for demonstrating the practical value of GRATE; the preliminary resilient-training result supports this direction by improving expected future-failure MLU while exposing a current-MLU tradeoff.
+GRATE investigates whether temporal structure in WAN demand matrices can improve ML-based traffic engineering. We built a temporal extension to HARP, generated dynamic Abilene temporal samples, solved final-timestep Gurobi optima, and evaluated a trained prototype. On 200 held-out dynamic Abilene samples, the corrected temporal model achieved average normalized MLU 1.0267, with no skipped samples and a worst-case normalized MLU of 1.1145. A matched snapshot-only HARP baseline achieved average normalized MLU 1.0837 on the same split, showing a modest but consistent current-MLU benefit from temporal history. In the adapted five-model comparison, temporal HARP remained ahead of snapshot HARP, DOTE, and TEAL on the shared current-MLU evaluation. Because the HARP models are near-optimal under myopic MLU, future-failure robustness and other temporal metrics are the more promising direction for demonstrating the practical value of GRATE; the preliminary resilient-training result supports this direction by improving expected future-failure MLU while exposing a current-MLU tradeoff.
 
 {\footnotesize \bibliographystyle{acm}
 \bibliography{refs}}

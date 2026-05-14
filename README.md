@@ -360,6 +360,16 @@ This writes detailed distributions and a CSV summary under:
 results/dynamic_abilene/4sp/0/resilience_compare_all_five/
 ```
 
+Generate the five-model figures used in the report with:
+
+```bash
+python3 scripts/visualize_all_five_dynamic_abilene.py
+```
+
+This writes `all_five_current_normalized_mlu_percentiles.png`,
+`all_five_resilience_metric_percentiles.png`, and a compact percentile table
+under `figures/dynamic_abilene/`.
+
 The comparison uses the same held-out dynamic Abilene slice `[800, 1000)` and
 the same future-failure resilience objective as the three-way HARP comparison:
 
