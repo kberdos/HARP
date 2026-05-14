@@ -45,17 +45,22 @@ Brown University
 
 
 \begin{abstract}
-GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We introduce GRATE (Generalizable Reactive W(An N traffic engineering), a temporal extension to HARP that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, compared with 1.0837 for a snapshot-only HARP baseline trained and evaluated on the same final time steps. A resilience-trained temporal checkpoint improved probability-weighted expected future-failure MLU over both baselines, at a small cost to current-step MLU. In an adapted five-model comparison on the same held-out samples, temporal HARP remained strongest on current MLU and the default combined resilience metric, while DOTE was the closest non-HARP baseline and TEAL struggled in this dynamic-topology setting. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations close to the LP optimum on this dynamic Abilene split, while also motivating robustness-oriented metrics beyond myopic current-step MLU.
+Wide-area networks (WANs) need to continuoly route traffic optimallyGRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We introduce GRATE (Generalizable Reactive W(An N traffic engineering), a temporal extension to HARP that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, compared with 1.0837 for a snapshot-only HARP baseline trained and evaluated on the same final time steps. A resilience-trained temporal checkpoint improved probability-weighted expected future-failure MLU over both baselines, at a small cost to current-step MLU. In an adapted five-model comparison on the same held-out samples, temporal HARP remained strongest on current MLU and the default combined resilience metric, while DOTE was the closest non-HARP baseline and TEAL struggled in this dynamic-topology setting. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations close to the LP optimum on this dynamic Abilene split, while also motivating robustness-oriented metrics beyond myopic current-step MLU.
 \end{abstract}
 
 \section{Introduction}
 
-WAN traffic engineering decides how traffic should be split across network paths so that operators can use network capacity efficiently and avoid congestion. Classical TE formulations solve an optimization problem for each traffic matrix, but solver latency can make this difficult to use for rapid adaptation. Recent ML-based TE systems instead learn to approximate solver outputs or solver-quality objectives, creating an opportunity to make TE decisions at much lower latency.
+WAN TE determines how traffic should be split across paths in the network such that its capacity is used efficiently and congestion is avoided. Existing TE approaches solve an optimization problem for each traffic demand matrix, but increasing network complexity and traffic demands have deemed the latency of classical solvers too high. Recent ML-based TE systems instead learn to approximate solver outputs or solver-quality objectives, creating an opportunity to make TE decisions at much lower latency.
 
-A key assumption of all of these existing TE systems is that they treat each problem as an independent, memory less snapshot: their models produce allocations based on only the \emph{current} traffic demand matrix. Prior work has shown that real-world WAN traffic demand matrices exhibit strong temporal structure and low intrinsic dimensionality \cite{lakhina2004structural}, 
+A key assumption of all of these existing ML-based TE systems is that they treat each problem as an independent, memoryless snapshot: their models produce allocations based on only the \emph{current} traffic demand matrix. Prior work has shown that real-world WAN traffic demand matrices exhibit strong temporal structure and low intrinsic dimensionality \cite{lakhina2004structural}, 
 yet none of these TE models exploit this feature.
 
-GRATE explores whether a HARP-style neural TE system can use short histories of demand and topology information rather than only the current demand matrix. The project is final-report work rather than a proposal: we implemented a temporal HARP path in the codebase, generated a dynamic Abilene dataset, added Gurobi optimal labels for the final timestep of each temporal sample, trained a prototype model, and evaluated that prototype on held-out samples.
+
+GRATE explores whether ML-based TE can improve routing decisions by using recent network history rather than treating each traffic demand matrix as an isolated snapshot. Instead of making a decision from only the current demand matrix, GRATE uses a short sequence of recent demand and network information to predict how traffic should be split across paths. Our goal is to test whether this temporal context helps produce lower-congestion routing decisions while preserving the low-latency advantages of ML-based TE.
+
+A second limitation is that WAN TE systems are typically framed around centralized control: a single controller observes network conditions and computes routing decisions for the network as a whole. This design is natural for optimization-based TE and for ML-based systems that imitate it, but it also raises resilience questions if the controller or its view of the network becomes unavailable or stale. In this report, we focus primarily on temporal demand encoding, but we also note centralized control as an important direction for future work.
+
+A second limitation is that WAN TE systems are typically framed around centralized control: a single controller observes network conditions and computes routing decisions for the network as a whole. This design is natural for optimization-based TE and for ML-based systems that imitate it, but it also raises resilience questions if the controller or its view of the network becomes unavailable or stale. In this report, we focus primarily on temporal demand encoding, but we also note centralized control as an important direction for future work.
 
 \section{Background and Related Work}
 
@@ -89,8 +94,6 @@ Our secondary research question is exploratory: to what extent do centralized co
 We implemented GRATE as a temporal extension to the HARP codebase. The main model changes are in the HARP system module, where the forward pass now accepts either ordinary snapshot inputs or a short temporal history. Traffic matrices are normalized into a common temporal form, and topology objects can be supplied as time-indexed sequences when the network changes across the history window.
 
 \begin{verbatim}
-frameworks/harp_system.py
-
 traffic matrix:
   [P, 1] or [B, P, 1] or [B, T, P, 1]
   -> [B, T, P, 1]
@@ -107,8 +110,6 @@ After the temporal encoder, the implementation keeps HARP's routing-allocation u
 The dynamic data pipeline constructs rolling temporal samples from Abilene demand traces. Each sample stores node features, time-indexed topology data, path-to-edge incidence, and the true and predicted traffic matrices for the full history window. The generated Abilene dataset used six timesteps, twelve nodes, four paths per source-destination pair, and 528 total paths.
 
 \begin{verbatim}
-generate_dynamic_abilene.py
-
 sample contents:
   node features over T timesteps
   time-indexed edge lists and capacities
@@ -263,9 +264,11 @@ Additional future work includes improving training stability, measuring inferenc
 
 \section{Project Member Contributions}
 
-\textbf{Ronit Kapoor:} [Replace this placeholder with Ronit's actual project contributions before submission.]
+\textbf{Ronit:} [Replace this placeholder with Ronit's actual project contributions before submission.]
 
-\textbf{Kazuya Erdos:} [Replace this placeholder with Kazuya's actual project contributions before submission.]
+\medbreak \noindent \textbf{Kazuya:} I led our study of the existing models (namely DOTE, TEAL, and HARP), and devised the original idea for extending with the temporal transformer. In terms of the presentation, I focused made the background slides explaining TE and ML-based TE and the existing works. After Ronit worked on the first version of our model extension, I helped fix a few bugs and then focused on the evaluation for MLU and the combined resilience metric on all five of the models.
+
+\medbreak \noindent Overall, our contributions were roughly equal and we both feel like we did meaningful work on the project.
 
 \section{Conclusion}
 
