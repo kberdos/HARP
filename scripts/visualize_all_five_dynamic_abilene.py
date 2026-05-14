@@ -28,8 +28,8 @@ MODEL_LABELS = {
     "vanilla_temporal": "Vanilla temporal",
     "resilient_temporal": "Resilient temporal",
     "snapshot_baseline": "Snapshot HARP",
-    "dote_adapter": "DOTE adapter",
-    "teal_adapter": "TEAL adapter",
+    "dote_adapter": "DOTE",
+    "teal_adapter": "TEAL",
 }
 MODEL_COLORS = {
     "vanilla_temporal": "#4477AA",

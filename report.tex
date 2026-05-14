@@ -214,9 +214,10 @@ Figure~\ref{fig:resilience-percentiles} breaks out the percentile profiles for t
 
 The three-way comparison shows a real tradeoff. Vanilla temporal HARP remains best on current MLU, worst-link degradation, and the default combined score. However, the resilient temporal checkpoint achieves the best expected future-failure metric: it improves expected-failure normalized MLU by 7.64\% over the snapshot baseline and by 1.43\% over vanilla temporal HARP. In exchange, it gives up about 1.08\% on current MLU relative to vanilla temporal HARP. This suggests that the resilience objective changes the learned allocation policy toward probability-weighted future-failure robustness rather than uniformly improving every MLU-derived metric.
 
-We then extended the comparison to include DOTE and TEAL under the same dynamic Abilene held-out slice and the same MLU-resilience evaluator. These rows should be read as HARP-data adapters rather than exact reproductions of the original papers' native experimental setups: the DOTE row uses the MAXUTIL multilayer perceptron with input and output dimensions changed for the 12-node, 4-path Abilene samples, while the TEAL row uses the FlowGNN actor structure with each sample's final topology graph. Both adapters were trained on samples 0--800 and evaluated on samples 800--1000, matching the HARP split.
+We then extended the comparison to include DOTE and TEAL under the same dynamic Abilene held-out slice and the same MLU-resilience evaluator. These rows should not be read as exact reproductions of the original papers' native experimental setups: the DOTE row uses the MAXUTIL multilayer perceptron with input and output dimensions changed for the 12-node, 4-path Abilene samples, while the TEAL row uses the FlowGNN actor structure with each sample's final topology graph. Both models were trained on samples 0--800 and evaluated on samples 800--1000, matching the HARP split.
 
-\begin{center}
+\begin{table*}[t]
+\centering
 \begin{tabular}{lrrrr}
 \hline
 Model & Current & Combined & Exp. fail. & Worst fail. \\
@@ -224,11 +225,13 @@ Model & Current & Combined & Exp. fail. & Worst fail. \\
 Vanilla temporal & 1.0287 & 1.8355 & 2.3391 & 4.1149 \\
 Resilient temporal & 1.0399 & 1.8480 & 2.3058 & 4.1595 \\
 Snapshot HARP & 1.0837 & 1.9375 & 2.4964 & 4.3346 \\
-DOTE adapter & 1.1545 & 2.0562 & 2.5960 & 4.6179 \\
-TEAL adapter & 2.7472 & 4.7729 & 5.2167 & 10.9889 \\
+DOTE & 1.1545 & 2.0562 & 2.5960 & 4.6179 \\
+TEAL & 2.7472 & 4.7729 & 5.2167 & 10.9889 \\
 \hline
 \end{tabular}
-\end{center}
+\caption{Average normalized metrics for the five-model dynamic Abilene comparison. Lower is better for all metrics.}
+\label{tab:all-five-resilience}
+\end{table*}
 
 Figure~\ref{fig:all-five-current-mlu-percentiles} shows the current-step MLU percentile profile for all five models. The ordering is consistent with the averages: vanilla temporal HARP has the lowest current MLU, resilient temporal HARP gives up a small amount of current performance, snapshot HARP remains close, DOTE is weaker but still within a plausible range, and TEAL is far behind on this shared dynamic-topology evaluation.
 

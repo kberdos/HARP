@@ -411,8 +411,8 @@ model                 combined    current    expected_failure    worst_failure
 vanilla_temporal       1.835491   1.028735            2.339113          4.114938
 resilient_temporal     1.848040   1.039879            2.305775          4.159516
 snapshot_baseline      1.937549   1.083662            2.496445          4.334649
-dote_adapter           2.056219   1.154477            2.596030          4.617908
-teal_adapter           4.772942   2.747234            5.216726         10.988937
+DOTE                   2.056219   1.154477            2.596030          4.617908
+TEAL                   4.772942   2.747234            5.216726         10.988937
 ```
 
 Percentile details:
@@ -434,15 +434,15 @@ snapshot_baseline     current            1.083662   1.083930   1.172289   1.2799
 snapshot_baseline     expected_failure   2.496445   2.541710   2.727249   3.062903
 snapshot_baseline     worst_failure      4.334649   4.335719   4.689154   5.119896
 
-dote_adapter          combined           2.056219   2.005457   2.549250   3.508076
-dote_adapter          current            1.154477   1.114250   1.485434   2.110486
-dote_adapter          expected_failure   2.596030   2.610985   2.882881   3.519255
-dote_adapter          worst_failure      4.617908   4.457002   5.941737   8.441945
+DOTE                  combined           2.056219   2.005457   2.549250   3.508076
+DOTE                  current            1.154477   1.114250   1.485434   2.110486
+DOTE                  expected_failure   2.596030   2.610985   2.882881   3.519255
+DOTE                  worst_failure      4.617908   4.457002   5.941737   8.441945
 
-teal_adapter          combined           4.772942   4.718507   7.004472   9.006591
-teal_adapter          current            2.747234   2.701462   4.128419   5.417578
-teal_adapter          expected_failure   5.216726   5.311987   6.281948   8.237237
-teal_adapter          worst_failure     10.988937  10.805847  16.513678  21.670313
+TEAL                  combined           4.772942   4.718507   7.004472   9.006591
+TEAL                  current            2.747234   2.701462   4.128419   5.417578
+TEAL                  expected_failure   5.216726   5.311987   6.281948   8.237237
+TEAL                  worst_failure     10.988937  10.805847  16.513678  21.670313
 ```
 
 Interpretation:
@@ -451,16 +451,16 @@ Interpretation:
   Abilene evaluation. Vanilla temporal HARP has the best `combined`,
   `current`, and `worst_failure` averages; resilient temporal HARP has the
   best `expected_failure` average.
-- The snapshot-only HARP baseline is still stronger than the DOTE and Teal
-  adapters on every reported metric, but DOTE remains reasonably close on
+- The snapshot-only HARP baseline is still stronger than DOTE and TEAL
+  on every reported metric, but DOTE remains reasonably close on
   current MLU: average `current` is 1.1545 versus 1.0837 for the snapshot
   baseline.
-- The DOTE adapter improves substantially over a generic equal-split behavior
-  and lands fourth overall. Its main weakness is tail robustness: p95
+- DOTE improves substantially over a generic equal-split behavior and lands
+  fourth overall. Its main weakness is tail robustness: p95
   `worst_failure` rises to 5.9417, compared with 4.6892 for the snapshot
   baseline and 4.2208 for vanilla temporal HARP.
-- The Teal adapter performs poorly on this dynamic Abilene setup. This is
-  consistent with the fact that Teal's original implementation assumes a
+- TEAL performs poorly on this dynamic Abilene setup. This is consistent with
+  the fact that Teal's original implementation assumes a
   static topology and was not designed for changing final-step edge sets. The
   adapter preserves the FlowGNN actor structure, but supplying a new final
   topology per sample is a harder transfer setting than Teal's native B4
