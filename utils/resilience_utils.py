@@ -9,32 +9,49 @@ def _canonical_edge(u, v):
     return (u, v) if u <= v else (v, u)
 
 
+def _normalize_risk(risk):
+    risk_sum = risk.sum()
+    if float(risk_sum.detach().cpu()) <= 0.0:
+        num_edges = risk.numel()
+        return torch.full(
+            (num_edges,),
+            1.0 / max(num_edges, 1),
+            device=risk.device,
+            dtype=risk.dtype,
+        )
+
+    return risk / risk_sum.clamp_min(1e-12)
+
+
 def final_edge_risk_from_history(
     sample,
     final_edge_index,
-    prior=1.0,
+    prior=1e-3,
     recency_power=2.0,
 ):
     """
-    Build per-directed-edge scenario probabilities from the sample's failure
-    history.
+    Extrapolate per-directed-edge scenario probabilities from failure history.
 
     Dynamic Abilene stores failures as undirected edges in
     sample["metadata"]["failed_by_t"]. We map those historical failures onto
-    the directed edges present at the final timestep. A positive prior keeps
-    every final link possible even when the short history contains no failures.
+    the directed edges present at the final timestep and build a binary history
+    for each final link. The next-step failure score is a recency-weighted
+    one-step linear extrapolation of that binary sequence, rather than an
+    average over all link-failure scenarios. A small positive prior keeps every
+    final link possible when the short history contains no usable signal.
     """
     num_edges = final_edge_index.shape[1]
     device = final_edge_index.device
     dtype = torch.float32
 
-    risk = torch.full((num_edges,), float(prior), device=device, dtype=dtype)
+    prior = max(float(prior), 0.0)
+    risk = torch.full((num_edges,), prior, device=device, dtype=dtype)
 
     metadata = sample.get("metadata", {})
     failed_by_t = metadata.get("failed_by_t", [])
 
     if not failed_by_t:
-        return risk / risk.sum().clamp_min(1e-12)
+        return _normalize_risk(risk)
 
     final_edges = [
         _canonical_edge(final_edge_index[0, i].item(), final_edge_index[1, i].item())
@@ -42,13 +59,13 @@ def final_edge_risk_from_history(
     ]
 
     num_timesteps = len(failed_by_t)
+    failure_history = torch.zeros(
+        (num_edges, num_timesteps),
+        device=device,
+        dtype=dtype,
+    )
 
     for t, failed_edges in enumerate(failed_by_t):
-        if num_timesteps == 1:
-            recency = 1.0
-        else:
-            recency = ((t + 1) / num_timesteps) ** recency_power
-
         failed_set = set()
         for edge in failed_edges:
             if len(edge) != 2:
@@ -60,9 +77,30 @@ def final_edge_risk_from_history(
 
         for edge_idx, final_edge in enumerate(final_edges):
             if final_edge in failed_set:
-                risk[edge_idx] += recency
+                failure_history[edge_idx, t] = 1.0
 
-    return risk / risk.sum().clamp_min(1e-12)
+    if num_timesteps == 1:
+        extrapolated = failure_history[:, 0]
+    else:
+        time = torch.arange(num_timesteps, device=device, dtype=dtype)
+        weights = ((time + 1.0) / float(num_timesteps)).pow(float(recency_power))
+        weights = weights / weights.sum().clamp_min(1e-12)
+
+        x_mean = (weights * time).sum()
+        centered_time = time - x_mean
+        y_mean = (failure_history * weights.view(1, -1)).sum(dim=-1)
+        covariance = (
+            failure_history - y_mean.view(-1, 1)
+        ).mul(weights.view(1, -1)).mul(centered_time.view(1, -1)).sum(dim=-1)
+        variance = (weights * centered_time.pow(2)).sum().clamp_min(1e-12)
+        slope = covariance / variance
+
+        next_time = torch.tensor(float(num_timesteps), device=device, dtype=dtype)
+        extrapolated = y_mean + slope * (next_time - x_mean)
+
+    risk = risk + extrapolated.clamp(0.0, 1.0)
+
+    return _normalize_risk(risk)
 
 
 def select_scenario_edges(edge_probs, scenario_top_k=0):
@@ -132,7 +170,7 @@ def resilience_loss_from_details(
     resilience_weight=0.25,
     worst_case_weight=0.5,
     failure_capacity_fraction=0.25,
-    risk_prior=1.0,
+    risk_prior=1e-3,
     risk_recency_power=2.0,
     scenario_top_k=0,
 ):

@@ -37,7 +37,7 @@ RESILIENCE_ARGS = SimpleNamespace(
     resilience_weight=0.25,
     worst_case_weight=0.5,
     failure_capacity_fraction=0.25,
-    risk_prior=1.0,
+    risk_prior=1e-3,
     risk_recency_power=2.0,
     scenario_top_k=0,
 )

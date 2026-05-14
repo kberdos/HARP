@@ -204,8 +204,10 @@ where:
   degradation scenarios, normalized by the current Gurobi optimum.
 - `worst_failure_norm` is the worst selected single-link degradation scenario,
   also normalized by the current Gurobi optimum.
-- Scenario probabilities come from recent failure history in
-  `sample["metadata"]["failed_by_t"]` plus a uniform prior.
+- Scenario probabilities are extrapolated from recent failure history in
+  `sample["metadata"]["failed_by_t"]`: each final link's binary failure
+  history is fit with a recency-weighted linear trend and projected one
+  timestep forward, then a small smoothing prior keeps unseen links possible.
 - `failure_capacity_fraction` controls the severity. The default `0.25` means
   one scenario link keeps 25 percent of its original capacity. This is a
   differentiable stress metric, not a post-failure reoptimization LP.
@@ -314,17 +316,17 @@ Observed three-way resilience comparison on the 200-sample held-out slice
 Average normalized metrics. Lower is better.
 
 metric              resilient_temporal    vanilla_temporal    snapshot_baseline
-combined                      1.848040            1.835491             1.937549
+combined                      1.847302            1.834735             1.937188
 current                       1.039879            1.028735             1.083662
-expected_failure              2.305775            2.339113             2.496445
+expected_failure              2.299872            2.333068             2.493552
 worst_failure                 4.159516            4.114938             4.334649
 
 Pairwise improvement percentages. Positive means the left model is better.
 
 metric              resilient vs baseline    resilient vs temporal    temporal vs baseline
-combined                            4.62%                   -0.68%                   5.27%
+combined                            4.64%                   -0.68%                   5.29%
 current                             4.04%                   -1.08%                   5.07%
-expected_failure                    7.64%                    1.43%                   6.30%
+expected_failure                    7.77%                    1.42%                   6.44%
 worst_failure                       4.04%                   -1.08%                   5.07%
 ```
 
@@ -408,40 +410,40 @@ Observed five-model results on the 200-sample dynamic Abilene held-out slice:
 Average normalized metrics. Lower is better.
 
 model                 combined    current    expected_failure    worst_failure
-vanilla_temporal       1.835491   1.028735            2.339113          4.114938
-resilient_temporal     1.848040   1.039879            2.305775          4.159516
-snapshot_baseline      1.937549   1.083662            2.496445          4.334649
-DOTE                   2.056219   1.154477            2.596030          4.617908
-TEAL                   4.772942   2.747234            5.216726         10.988937
+vanilla_temporal       1.834735   1.028735            2.333068          4.114938
+resilient_temporal     1.847302   1.039879            2.299872          4.159516
+snapshot_baseline      1.937188   1.083662            2.493552          4.334649
+DOTE                   2.055982   1.154477            2.594128          4.617908
+TEAL                   4.775506   2.747234            5.237235         10.988937
 ```
 
 Percentile details:
 
 ```text
 model                 metric              average     median        p95        max
-vanilla_temporal      combined           1.835491   1.842293   1.889381   2.011178
+vanilla_temporal      combined           1.834735   1.840823   1.891345   2.011178
 vanilla_temporal      current            1.028735   1.028435   1.055192   1.117073
-vanilla_temporal      expected_failure   2.339113   2.376451   2.520195   2.801129
+vanilla_temporal      expected_failure   2.333068   2.373963   2.558084   2.971927
 vanilla_temporal      worst_failure      4.114938   4.113741   4.220767   4.468291
 
-resilient_temporal    combined           1.848040   1.842995   1.986221   2.062167
+resilient_temporal    combined           1.847302   1.842103   1.986221   2.062167
 resilient_temporal    current            1.039879   1.031396   1.118162   1.202261
-resilient_temporal    expected_failure   2.305775   2.340888   2.521950   2.729110
+resilient_temporal    expected_failure   2.299872   2.340888   2.523661   2.870998
 resilient_temporal    worst_failure      4.159516   4.125583   4.472648   4.809043
 
-snapshot_baseline     combined           1.937549   1.943837   2.106518   2.292293
+snapshot_baseline     combined           1.937188   1.943418   2.106759   2.292293
 snapshot_baseline     current            1.083662   1.083930   1.172289   1.279974
-snapshot_baseline     expected_failure   2.496445   2.541710   2.727249   3.062903
+snapshot_baseline     expected_failure   2.493552   2.539322   2.744796   3.882090
 snapshot_baseline     worst_failure      4.334649   4.335719   4.689154   5.119896
 
-DOTE                  combined           2.056219   2.005457   2.549250   3.508076
+DOTE                  combined           2.055982   2.005457   2.549250   3.508076
 DOTE                  current            1.154477   1.114250   1.485434   2.110486
-DOTE                  expected_failure   2.596030   2.610985   2.882881   3.519255
+DOTE                  expected_failure   2.594128   2.614672   2.918315   3.519255
 DOTE                  worst_failure      4.617908   4.457002   5.941737   8.441945
 
-TEAL                  combined           4.772942   4.718507   7.004472   9.006591
+TEAL                  combined           4.775506   4.713036   7.004472   9.006591
 TEAL                  current            2.747234   2.701462   4.128419   5.417578
-TEAL                  expected_failure   5.216726   5.311987   6.281948   8.237237
+TEAL                  expected_failure   5.237235   5.312802   6.380446   9.575958
 TEAL                  worst_failure     10.988937  10.805847  16.513678  21.670313
 ```
 

@@ -45,14 +45,14 @@ Brown University
 
 
 \begin{abstract}
-GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We implemented a temporal extension to the HARP codebase that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, compared with 1.0837 for a snapshot-only HARP baseline trained and evaluated on the same final timesteps. A resilience-trained temporal checkpoint improved probability-weighted expected future-failure MLU over both baselines, at a small cost to current-step MLU. In an adapted five-model comparison on the same held-out samples, temporal HARP remained strongest on current MLU and the default combined resilience metric, while DOTE was the closest non-HARP baseline and TEAL struggled in this dynamic-topology setting. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations close to the LP optimum on this dynamic Abilene split, while also motivating robustness-oriented metrics beyond myopic current-step MLU.
+GRATE studies temporal demand-aware WAN traffic engineering. Existing ML-based TE systems such as DOTE, TEAL, and HARP can approximate optimization-based routing decisions much faster than LP solvers, but they commonly treat each traffic demand matrix as a memoryless snapshot. We introduce GRATE (Generalizable Reactive W(An N traffic engineering), a temporal extension to HARP that feeds rolling demand and topology windows into a temporal path encoder before the existing HARP routing-allocation refinement loop. Our prototype builds dynamic Abilene samples with six-timestep histories, per-timestep topology/path tensors, and Gurobi-computed optimal MLU labels for the final timestep. In our current dynamic Abilene experiment, the temporal model achieved an average normalized MLU of 1.0267 over 200 held-out samples, compared with 1.0837 for a snapshot-only HARP baseline trained and evaluated on the same final time steps. A resilience-trained temporal checkpoint improved probability-weighted expected future-failure MLU over both baselines, at a small cost to current-step MLU. In an adapted five-model comparison on the same held-out samples, temporal HARP remained strongest on current MLU and the default combined resilience metric, while DOTE was the closest non-HARP baseline and TEAL struggled in this dynamic-topology setting. These results show that the temporal pipeline is implemented end-to-end and can learn routing allocations close to the LP optimum on this dynamic Abilene split, while also motivating robustness-oriented metrics beyond myopic current-step MLU.
 \end{abstract}
 
 \section{Introduction}
 
 WAN traffic engineering decides how traffic should be split across network paths so that operators can use network capacity efficiently and avoid congestion. Classical TE formulations solve an optimization problem for each traffic matrix, but solver latency can make this difficult to use for rapid adaptation. Recent ML-based TE systems instead learn to approximate solver outputs or solver-quality objectives, creating an opportunity to make TE decisions at much lower latency.
 
-A key assumption of all of these existing TE systems is that they treat each problem as an independent, memoryless snapshot: their models produce allocations based on only the \emph{current} traffic demand matrix. Prior work has shown that real-world WAN traffic demand matrices exhibit strong temporal structure and low intrinsic dimensionality \cite{lakhina2004structural}, 
+A key assumption of all of these existing TE systems is that they treat each problem as an independent, memory less snapshot: their models produce allocations based on only the \emph{current} traffic demand matrix. Prior work has shown that real-world WAN traffic demand matrices exhibit strong temporal structure and low intrinsic dimensionality \cite{lakhina2004structural}, 
 yet none of these TE models exploit this feature.
 
 GRATE explores whether a HARP-style neural TE system can use short histories of demand and topology information rather than only the current demand matrix. The project is final-report work rather than a proposal: we implemented a temporal HARP path in the codebase, generated a dynamic Abilene dataset, added Gurobi optimal labels for the final timestep of each temporal sample, trained a prototype model, and evaluated that prototype on held-out samples.
@@ -61,7 +61,7 @@ GRATE explores whether a HARP-style neural TE system can use short histories of 
 
 Traditionally, Wide-area network (WAN) traffic engineering (TE) strategies use linear programming (LP) solvers to determine optimal flows for how traffic demands are routed. Objectives for optimization include maximizing flow rate or minimizing maximum link utilization (MLU). Recent work such as DOTE \cite{perry2023dote}, TEAL \cite{Teal}, and HARP \cite{Harp} use machine learning to \emph{approximate} optimal solutions for TE much faster than LP solvers. This unlocks real-time adaptation to changing network conditions.
 
-DOTE directly optimizes for MLU by creating a closed-form approximate loss function for MLU based only on previous demands. The authors make the assumption / observation that the current MLU will approximate the average of the previous (calcualted) MLUs, and thus can construct a gradient and loss function. DOTE is especially relevant to us since it reframes predictive WAN TE by using learning to improve TE under demand uncertainty. DOTE is constructed as a feed-forward DNN that takes a representation of the previous traffic demands and network topology (including link capacities) and produces TE splits. A key observation to make is that DOTE must train on a specific topology and, since the input is directly fed into a linear layer, it is sensitive to changes to topology and/or input. However, DOTE \textit{does} consider a series of previous timesteps / snapshots of the network, and is the only such model we studied that does so. 
+DOTE directly optimizes for MLU by creating a closed-form approximate loss function for MLU based only on previous demands. The authors make the assumption / observation that the current MLU will approximate the average of the previous (calculated) MLUs, and thus can construct a gradient and loss function. DOTE is especially relevant to us since it re-frames predictive WAN TE by using learning to improve TE under demand uncertainty. DOTE is constructed as a feed-forward DNN that takes a representation of the previous traffic demands and network topology (including link capacities) and produces TE splits. A key observation to make is that DOTE must train on a specific topology and, since the input is directly fed into a linear layer, it is sensitive to changes to topology and/or input. However, DOTE \textit{does} consider a series of previous time steps / snapshots of the network, and is the only such model we studied that does so. 
 
 TEAL is a work that expands upon DOTE by directly modeling the network topology and combining multiple ML-based approaches. First, their FlowGNN, which is a mixed GNN / DNN, learns embeddings for the edges and paths in the network, encoding link capacities and demands. They then employ a multi-agent RL step that learns a global policy network using an advanced version of the COMA algorithm \cite{foerster2018counterfactual}. Compared to DOTE, TEAL is able to learn higher-dimensional features about the network, and performs better than DOTE in terms of MLU and inference speed. Still, TEAL does not model temporal changes to the network, and is still sensitive to changes to the topology or input.
 
@@ -188,16 +188,16 @@ Figure~\ref{fig:current-mlu-percentiles} shows the same current-step comparison 
 
 As a debugging reference point, before correcting the padding-mask handling in the temporal path encoder, the saved model collapsed to uniform path splits and produced an average normalized MLU of approximately 4.3037 on the same held-out slice. The corrected result therefore reflects an actual learned routing policy rather than an equal-split fallback.
 
-Because the current-step MLU gap between temporal HARP and the snapshot baseline is modest, we also evaluated a robustness-oriented training objective. The resilient temporal checkpoint uses the same architecture as temporal HARP, but its loss combines current normalized MLU with a future-failure stress term. The stress term keeps the learned final-step split fixed and evaluates single-link degradation scenarios on the final topology, using recent failure history to weight the expected degradation term. This objective is not a post-failure LP reoptimization; it is a differentiable way to bias the learned allocation toward routes that remain usable under likely near-future link degradation.
+Because the current-step MLU gap between temporal HARP and the snapshot baseline is modest, we also evaluated a robustness-oriented training objective. The resilient temporal checkpoint uses the same architecture as temporal HARP, but its loss combines current normalized MLU with a future-failure stress term. The stress term keeps the learned final-step split fixed and evaluates single-link degradation scenarios on the final topology. For the expected-degradation term, each final link's recent binary failure history is fit with a recency-weighted linear trend and extrapolated one timestep forward, with a small smoothing prior for unseen links. This objective is not a post-failure LP reoptimization; it is a differentiable way to bias the learned allocation toward routes that remain usable under likely near-future link degradation.
 
 \begin{center}
 \begin{tabular}{lrrr}
 \hline
 Metric & Res. temp. & Temp. & Snapshot \\
 \hline
-Combined & 1.8480 & 1.8355 & 1.9375 \\
+Combined & 1.8473 & 1.8347 & 1.9372 \\
 Current MLU & 1.0399 & 1.0287 & 1.0837 \\
-Expected failure & 2.3058 & 2.3391 & 2.4964 \\
+Expected failure & 2.2999 & 2.3331 & 2.4936 \\
 Worst failure & 4.1595 & 4.1149 & 4.3346 \\
 \hline
 \end{tabular}
@@ -212,7 +212,7 @@ Figure~\ref{fig:resilience-percentiles} breaks out the percentile profiles for t
 \label{fig:resilience-percentiles}
 \end{figure*}
 
-The three-way comparison shows a real tradeoff. Vanilla temporal HARP remains best on current MLU, worst-link degradation, and the default combined score. However, the resilient temporal checkpoint achieves the best expected future-failure metric: it improves expected-failure normalized MLU by 7.64\% over the snapshot baseline and by 1.43\% over vanilla temporal HARP. In exchange, it gives up about 1.08\% on current MLU relative to vanilla temporal HARP. This suggests that the resilience objective changes the learned allocation policy toward probability-weighted future-failure robustness rather than uniformly improving every MLU-derived metric.
+The three-way comparison shows a real tradeoff. Vanilla temporal HARP remains best on current MLU, worst-link degradation, and the default combined score. However, the resilient temporal checkpoint achieves the best expected future-failure metric: it improves expected-failure normalized MLU by 7.77\% over the snapshot baseline and by 1.42\% over vanilla temporal HARP. In exchange, it gives up about 1.08\% on current MLU relative to vanilla temporal HARP. This suggests that the resilience objective changes the learned allocation policy toward probability-weighted future-failure robustness rather than uniformly improving every MLU-derived metric.
 
 We then extended the comparison to include DOTE and TEAL under the same dynamic Abilene held-out slice and the same MLU-resilience evaluator. These rows should not be read as exact reproductions of the original papers' native experimental setups: the DOTE row uses the MAXUTIL multilayer perceptron with input and output dimensions changed for the 12-node, 4-path Abilene samples, while the TEAL row uses the FlowGNN actor structure with each sample's final topology graph. Both models were trained on samples 0--800 and evaluated on samples 800--1000, matching the HARP split.
 
@@ -222,11 +222,11 @@ We then extended the comparison to include DOTE and TEAL under the same dynamic 
 \hline
 Model & Current & Combined & Exp. fail. & Worst fail. \\
 \hline
-Vanilla temporal & 1.0287 & 1.8355 & 2.3391 & 4.1149 \\
-Resilient temporal & 1.0399 & 1.8480 & 2.3058 & 4.1595 \\
-Snapshot HARP & 1.0837 & 1.9375 & 2.4964 & 4.3346 \\
-DOTE & 1.1545 & 2.0562 & 2.5960 & 4.6179 \\
-TEAL & 2.7472 & 4.7729 & 5.2167 & 10.9889 \\
+Vanilla temporal & 1.0287 & 1.8347 & 2.3331 & 4.1149 \\
+Resilient temporal & 1.0399 & 1.8473 & 2.2999 & 4.1595 \\
+Snapshot HARP & 1.0837 & 1.9372 & 2.4936 & 4.3346 \\
+DOTE & 1.1545 & 2.0560 & 2.5941 & 4.6179 \\
+TEAL & 2.7472 & 4.7755 & 5.2372 & 10.9889 \\
 \hline
 \end{tabular}
 \caption{Average normalized metrics for the five-model dynamic Abilene comparison. Lower is better for all metrics.}
@@ -276,3 +276,4 @@ GRATE investigates whether temporal structure in WAN demand matrices can improve
 
 
 \end{document}
+

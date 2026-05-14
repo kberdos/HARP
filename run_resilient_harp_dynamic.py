@@ -57,7 +57,7 @@ def parse_resilience_args():
     parser.add_argument("--resilience_weight", type=float, default=0.25)
     parser.add_argument("--worst_case_weight", type=float, default=0.5)
     parser.add_argument("--failure_capacity_fraction", type=float, default=0.25)
-    parser.add_argument("--risk_prior", type=float, default=1.0)
+    parser.add_argument("--risk_prior", type=float, default=1e-3)
     parser.add_argument("--risk_recency_power", type=float, default=2.0)
     parser.add_argument(
         "--scenario_top_k",
@@ -390,6 +390,7 @@ def main():
         f"{args.worst_case_weight} * worst_failure_norm)"
     )
     print(f"Failure capacity fraction: {args.failure_capacity_fraction}")
+    print("Risk model: recency-weighted one-step failure extrapolation")
     print(f"Risk prior: {args.risk_prior}")
     print(f"Risk recency power: {args.risk_recency_power}")
     print(f"Scenario top-k: {args.scenario_top_k if args.scenario_top_k > 0 else 'all'}")
