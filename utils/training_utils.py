@@ -67,10 +67,27 @@ def dynamic_mlu_loss(
         add a supervised/distillation term that nudges predicted path split
         ratios toward the Gurobi optimal path split ratios.
 
-    Important:
-        This function intentionally does NOT silently convert NaN/Inf predicted
-        tensors into zero. If predicted is non-finite, training should skip or
-        crash loudly rather than hide the bug.
+    Returns:
+        loss:
+            Differentiable combined loss tensor.
+
+        loss_value:
+            Combined scalar loss value.
+
+        norm_mlu_loss_value:
+            Pure normalized MLU term, before split-loss weighting.
+
+        raw_mlu_value:
+            Raw model MLU, equal to max edge utilization.
+
+        total_util_value:
+            Sum of all edge utilizations.
+
+        tm_sum_value:
+            Sum of final-timestep traffic.
+
+        split_loss_value:
+            Pure split imitation MSE before multiplying by split_loss_weight.
     """
     if not torch.isfinite(predicted).all():
         raise RuntimeError("Non-finite predicted tensor reached dynamic_mlu_loss")
@@ -151,6 +168,7 @@ def dynamic_mlu_loss(
         raise RuntimeError("Non-finite dynamic loss computed")
 
     loss_value = float(loss.detach().cpu())
+    norm_mlu_loss_value = float(base_loss.detach().cpu())
     raw_mlu_value = float(max_cong.detach().cpu())
     total_util_value = float(total_util.detach().cpu())
     tm_sum_value = float(tm_final_sum.detach().cpu())
@@ -159,11 +177,13 @@ def dynamic_mlu_loss(
     return (
         loss,
         loss_value,
+        norm_mlu_loss_value,
         raw_mlu_value,
         total_util_value,
         tm_sum_value,
         split_loss_value,
     )
+
 
 class DynamicAbileneDataset(Dataset):
     """
@@ -284,6 +304,7 @@ def run_model_on_dynamic_sample(model, props, sample):
 
 def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
     loss_values = []
+    norm_mlu_values = []
     skipped = 0
 
     with tqdm(train_dl) as tepoch:
@@ -307,6 +328,7 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
                 (
                     loss,
                     loss_value,
+                    norm_mlu_loss_value,
                     raw_mlu_value,
                     total_util_value,
                     tm_sum_value,
@@ -333,9 +355,14 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
             optimizer.step()
 
             loss_values.append(loss_value)
+            norm_mlu_values.append(norm_mlu_loss_value)
+
             avg_loss = sum(loss_values) / len(loss_values)
+            avg_norm_mlu = sum(norm_mlu_values) / len(norm_mlu_values)
+
             tepoch.set_postfix(
                 loss=avg_loss,
+                norm_mlu=avg_norm_mlu,
                 raw_mlu=raw_mlu_value,
                 total_util=total_util_value,
                 tm_sum=tm_sum_value,
@@ -351,6 +378,7 @@ def train_dynamic(model, props, train_dl, optimizer, epoch, n_epochs):
 
 def validate_dynamic(model, props, val_dl):
     loss_values = []
+    norm_mlu_values = []
     skipped = 0
 
     with torch.no_grad():
@@ -372,6 +400,7 @@ def validate_dynamic(model, props, val_dl):
                     (
                         loss,
                         loss_value,
+                        norm_mlu_loss_value,
                         raw_mlu_value,
                         total_util_value,
                         tm_sum_value,
@@ -394,9 +423,14 @@ def validate_dynamic(model, props, val_dl):
                     continue
 
                 loss_values.append(loss_value)
+                norm_mlu_values.append(norm_mlu_loss_value)
+
                 avg_loss = sum(loss_values) / len(loss_values)
+                avg_norm_mlu = sum(norm_mlu_values) / len(norm_mlu_values)
+
                 vals.set_postfix(
                     loss=avg_loss,
+                    norm_mlu=avg_norm_mlu,
                     raw_mlu=raw_mlu_value,
                     total_util=total_util_value,
                     tm_sum=tm_sum_value,
@@ -412,6 +446,7 @@ def validate_dynamic(model, props, val_dl):
 
 def test_dynamic(model, props, test_dl, values_path, stats_path):
     loss_values = []
+    norm_mlu_values = []
     skipped = 0
 
     with torch.no_grad():
@@ -434,6 +469,7 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
                         (
                             loss,
                             loss_value,
+                            norm_mlu_loss_value,
                             raw_mlu_value,
                             total_util_value,
                             tm_sum_value,
@@ -456,10 +492,16 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
                         continue
 
                     loss_values.append(loss_value)
+                    norm_mlu_values.append(norm_mlu_loss_value)
+
                     values_file.write(str(loss_value) + "\n")
+
                     avg_loss = sum(loss_values) / len(loss_values)
+                    avg_norm_mlu = sum(norm_mlu_values) / len(norm_mlu_values)
+
                     tests.set_postfix(
                         loss=avg_loss,
+                        norm_mlu=avg_norm_mlu,
                         raw_mlu=raw_mlu_value,
                         total_util=total_util_value,
                         tm_sum=tm_sum_value,
@@ -473,20 +515,28 @@ def test_dynamic(model, props, test_dl, values_path, stats_path):
         return avg_loss
 
     avg_loss = sum(loss_values) / len(loss_values)
-    print(f"Dynamic Test Error:\nAvg loss: {avg_loss:>8f}\n")
+    avg_norm_mlu = sum(norm_mlu_values) / len(norm_mlu_values)
+
+    print(f"Dynamic Test Error:\nAvg combined loss: {avg_loss:>8f}")
+    print(f"Dynamic Test NormMLU:\nAvg norm MLU: {avg_norm_mlu:>8f}\n")
 
     dists = [float(v) for v in loss_values]
     dists.sort()
 
+    norm_dists = [float(v) for v in norm_mlu_values]
+    norm_dists.sort()
+
     with open(stats_path, "w") as f:
-        f.write("Average: " + str(statistics.mean(dists)) + "\n")
-        f.write("Median: " + str(dists[int(len(dists) * 0.5)]) + "\n")
-        f.write("25TH: " + str(dists[int(len(dists) * 0.25)]) + "\n")
-        f.write("75TH: " + str(dists[int(len(dists) * 0.75)]) + "\n")
-        f.write("90TH: " + str(dists[int(len(dists) * 0.90)]) + "\n")
-        f.write("95TH: " + str(dists[int(len(dists) * 0.95)]) + "\n")
-        f.write("99TH: " + str(dists[int(len(dists) * 0.99)]) + "\n")
-        f.write("100TH: " + str(dists[int(len(dists) - 1)]) + "\n")
+        f.write("Average combined loss: " + str(statistics.mean(dists)) + "\n")
+        f.write("Average norm MLU: " + str(statistics.mean(norm_dists)) + "\n")
+        f.write("Median combined loss: " + str(dists[int(len(dists) * 0.5)]) + "\n")
+        f.write("Median norm MLU: " + str(norm_dists[int(len(norm_dists) * 0.5)]) + "\n")
+        f.write("25TH combined loss: " + str(dists[int(len(dists) * 0.25)]) + "\n")
+        f.write("75TH combined loss: " + str(dists[int(len(dists) * 0.75)]) + "\n")
+        f.write("90TH combined loss: " + str(dists[int(len(dists) * 0.90)]) + "\n")
+        f.write("95TH combined loss: " + str(dists[int(len(dists) * 0.95)]) + "\n")
+        f.write("99TH combined loss: " + str(dists[int(len(dists) * 0.99)]) + "\n")
+        f.write("100TH combined loss: " + str(dists[int(len(dists) - 1)]) + "\n")
         f.write("Skipped: " + str(skipped) + "\n")
 
     return avg_loss

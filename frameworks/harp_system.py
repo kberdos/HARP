@@ -76,8 +76,6 @@ class TransformerModel(nn.Module):
             output: [batch_size, seq_len, in_dim]
         """
 
-        if src_key_padding_mask is not None:
-            src_key_padding_mask = (~src_key_padding_mask)
 
         output = self.transformer_encoder(
             src,

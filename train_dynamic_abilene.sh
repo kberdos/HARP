@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH -t 08:00:00
-#SBATCH -o logs/harp_h6_1000_%j.out
+#SBATCH -o logs/harp_h1_1000_%j.out
 
 set -euo pipefail
 
