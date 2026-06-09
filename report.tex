@@ -96,32 +96,28 @@ Our secondary research question is exploratory: to what extent do centralized co
 
 We implemented GRATE as a temporal extension to the HARP codebase. The main model changes are in the HARP system module, where the forward pass now accepts either ordinary snapshot inputs or a short temporal history. Traffic matrices are normalized into a common temporal form, and topology objects can be supplied as time-indexed sequences when the network changes across the history window.
 
-\begin{verbatim}
-traffic matrix:
-  [P, 1] or [B, P, 1] or [B, T, P, 1]
-  -> [B, T, P, 1]
-
-dynamic topology:
-  edge_index, capacities, path padding,
-  and path-edge incidence are indexed by time
-\end{verbatim}
-
 The temporal path encoder first embeds each path's edge sequence with the existing Set Transformer. It then forms a short sequence of per-timestep path embeddings, combines those embeddings with the corresponding demand values, applies positional encoding, and runs a temporal Transformer over the history. The resulting final path embedding is concatenated with final-timestep demand before the HARP allocation MLP predicts per-path split weights.
 
 After the temporal encoder, the implementation keeps HARP's routing-allocation update structure: it computes edge utilization and MLU, identifies bottleneck-link features per path, and refines path split weights over several RAU-style iterations. The final output returned by the model is final-timestep edge utilization.
 
 The dynamic data pipeline constructs rolling temporal samples from Abilene demand traces. Each sample stores node features, time-indexed topology data, path-to-edge incidence, and the true and predicted traffic matrices for the full history window. The generated Abilene dataset used six timesteps, twelve nodes, four paths per source-destination pair, and 528 total paths.
 
-\begin{verbatim}
-sample contents:
-  node features over T timesteps
-  time-indexed edge lists and capacities
-  time-indexed path-to-edge mappings
-  traffic histories with shape [1, T, P, 1]
-
-inspected Abilene sample:
-  T = 6, N = 12, K = 4, P = 528
-\end{verbatim}
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lp{0.58\columnwidth}}
+\hline
+Component & Representation \\
+\hline
+Traffic matrix & Inputs with shape \([P,1]\), \([B,P,1]\), or \([B,T,P,1]\) are canonicalized to \([B,T,P,1]\). \\
+Dynamic topology & Edge lists, capacities, path padding, and path-edge incidence are indexed by timestep. \\
+Sample contents & Node features, topology state, path mappings, and traffic histories are stored over the full history window. \\
+Abilene setting & \(T=6\) timesteps, \(N=12\) nodes, \(K=4\) paths per pair, and \(P=528\) total paths. \\
+\hline
+\end{tabular}
+\caption{Temporal sample representation used by GRATE. The model canonicalizes traffic and topology inputs into a time-indexed format so the temporal encoder can process a fixed history window.}
+\label{tab:temporal-sample-representation}
+\end{table}
 
 The optimal-label pipeline extracts the final timestep of each temporal sample and solves the path-splitting linear program. The LP minimizes maximum link utilization, requires each source-destination pair's path splits to sum to one, and ensures that the routed demand on every edge is less than that edge's corresponding capacity. The resulting scalar optimal MLU is stored with the sample.
 
@@ -133,16 +129,25 @@ We added Gurobi optimal MLU labels to all 1000 generated samples. In the local d
 
 GRATE (our temporal HARP prototype) was trained for 20 epochs with learning rate 0.00005, two Transformer layers, three GNN layers, three RAU-style refinement loops, and dynamic optimal labels. Samples 0--800 were used for training and samples 800--1000 for validation and testing. The dynamic dataloader currently requires batch size 1 because samples may have different edge counts or path lengths.
 
-\begin{verbatim}
-train_dynamic_abilene.sh
-
-topology: dynamic_abilene
-epochs: 20
-learning rate: 0.00005
-paths per pair: 4
-train / validation split: 0--800 / 800--1000
-dynamic optimal labels: enabled
-\end{verbatim}
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lr}
+\hline
+Training setting & Value \\
+\hline
+Script & \texttt{train\_dynamic\_abilene.sh} \\
+Topology & \texttt{dynamic\_abilene} \\
+Epochs & 20 \\
+Learning rate & 0.00005 \\
+Paths per pair & 4 \\
+Train / validation split & 0--800 / 800--1000 \\
+Dynamic optimal labels & enabled \\
+\hline
+\end{tabular}
+\caption{Training configuration for the dynamic Abilene experiment. The same held-out split is used later for the temporal model, snapshot HARP baseline, and adapted DOTE/TEAL comparisons.}
+\label{tab:training-configuration}
+\end{table}
 
 \section{Results}
 
@@ -181,14 +186,14 @@ Snapshot HARP baseline & 1.0837 & 1.1723 & 1.2800 \\
 \end{tabular}
 \end{center}
 
-Figure~\ref{fig:current-mlu-percentiles} shows the same current-step comparison across the held-out percentile profile.
+Figure~\ref{fig:current-mlu-percentiles} shows the same current-step comparison across the held-out percentile profile. This is the main visual result: temporal history consistently improves the snapshot-only baseline while staying close to the LP optimum.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\columnwidth]{figures/dynamic_abilene/current_normalized_mlu_percentiles.png}
+\includegraphics[width=0.82\textwidth]{figures/dynamic_abilene/current_normalized_mlu_percentiles.png}
 \caption{Held-out normalized current-step MLU percentiles on dynamic Abilene. The temporal model improves the upper tail relative to the snapshot-only baseline, especially at the 95th and 99th percentiles.}
 \label{fig:current-mlu-percentiles}
-\end{figure}
+\end{figure*}
 
 As a debugging reference point, before correcting the padding-mask handling in the temporal path encoder, the saved model collapsed to uniform path splits and produced an average normalized MLU of approximately 4.3037 on the same held-out slice. The corrected result therefore reflects an actual learned routing policy rather than an equal-split fallback.
 
@@ -206,15 +211,6 @@ Worst failure & 4.1595 & 4.1149 & 4.3346 \\
 \hline
 \end{tabular}
 \end{center}
-
-Figure~\ref{fig:resilience-percentiles} breaks out the percentile profiles for the combined, current, expected-failure, and worst-failure metrics.
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.92\textwidth]{figures/dynamic_abilene/resilience_metric_percentiles.png}
-\caption{Percentile profiles for the three-way resilience evaluation. The resilient objective improves the expected-failure profile relative to vanilla temporal HARP, while vanilla temporal HARP remains strongest on current-step and worst-failure metrics under the default objective weights.}
-\label{fig:resilience-percentiles}
-\end{figure*}
 
 The three-way comparison shows a real tradeoff. Vanilla temporal HARP remains best on current MLU, worst-link degradation, and the default combined score. However, the resilient temporal checkpoint achieves the best expected future-failure metric: it improves expected-failure normalized MLU by 7.77\% over the snapshot baseline and by 1.42\% over vanilla temporal HARP. In exchange, it gives up about 1.08\% on current MLU relative to vanilla temporal HARP. This suggests that the resilience objective changes the learned allocation policy toward probability-weighted future-failure robustness rather than uniformly improving every MLU-derived metric.
 
@@ -237,23 +233,7 @@ TEAL & 2.7472 & 4.7755 & 5.2372 & 10.9889 \\
 \label{tab:all-five-resilience}
 \end{table*}
 
-Figure~\ref{fig:all-five-current-mlu-percentiles} shows the current-step MLU percentile profile for all five models. The ordering is consistent with the averages: vanilla temporal HARP has the lowest current MLU, resilient temporal HARP gives up a small amount of current performance, snapshot HARP remains close, DOTE is weaker but still within a plausible range, and TEAL is far behind on this shared dynamic-topology evaluation.
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.92\textwidth]{figures/dynamic_abilene/all_five_current_normalized_mlu_percentiles.png}
-\caption{Held-out normalized current-step MLU percentiles for the five-model dynamic Abilene comparison. All models are evaluated on the same 200 samples and normalized by the same final-step Gurobi optima.}
-\label{fig:all-five-current-mlu-percentiles}
-\end{figure*}
-
-Figure~\ref{fig:all-five-resilience-percentiles} shows the same five-model comparison for the resilience metrics. The HARP variants dominate the combined and worst-failure metrics. DOTE is the closest non-HARP baseline, but its upper-tail degradation is noticeably higher than snapshot HARP. TEAL performs poorly here, which is consistent with the fact that the adapted evaluation changes the final topology from sample to sample; this is a harder transfer setting than TEAL's original static-topology workflow.
-
-\begin{figure*}[t]
-\centering
-\includegraphics[width=0.92\textwidth]{figures/dynamic_abilene/all_five_resilience_metric_percentiles.png}
-\caption{Five-model percentile profiles for the combined, current, expected-failure, and worst-failure metrics on dynamic Abilene. Lower is better for all metrics.}
-\label{fig:all-five-resilience-percentiles}
-\end{figure*}
+The five-model averages in Table~\ref{tab:all-five-resilience} show the same ordering without adding more dense percentile plots. Vanilla temporal HARP has the lowest current MLU, resilient temporal HARP gives up a small amount of current performance, snapshot HARP remains close, DOTE is weaker but still within a plausible range, and TEAL is far behind on this shared dynamic-topology evaluation. The HARP variants also dominate the combined and worst-failure metrics. DOTE is the closest non-HARP baseline, but its worst-failure degradation is noticeably higher than snapshot HARP. TEAL performs poorly here, which is consistent with the fact that the adapted evaluation changes the final topology from sample to sample; this is a harder transfer setting than TEAL's original static-topology workflow.
 
 \section{Discussion and Future Work}
 
@@ -261,7 +241,7 @@ For future work, we also wonder to what extent the centralized nature of control
 
 The main lesson from the implementation is that temporal demand-aware HARP requires more than simply adding a Transformer over time. The prototype now carries temporal tensors through the HARP data path, handles list-valued dynamic topologies, pads path lengths across timesteps, and uses the final timestep for LP labels and edge-utilization evaluation. We also found that correct padding-mask semantics are critical: an inverted mask can make the path encoder attend to padding rather than valid path edges, poisoning gradients and reducing the model to uniform splitting. With this corrected, the temporal prototype reached near-optimal MLU on held-out dynamic Abilene samples.
 
-The main limitation is experimental: current-step normalized MLU may be too narrow a metric to expose the full value of temporal information. The snapshot-only HARP baseline is already close to optimal on this split, so the average current-MLU improvement from temporal history is real but modest. The preliminary resilience experiment supports this concern: changing the objective improves expected future-failure MLU, but does not uniformly improve current MLU or worst-case degradation. [TODO: Add some of our next steps]
+The main limitation is experimental: current-step normalized MLU may be too narrow a metric to expose the full value of temporal information. The snapshot-only HARP baseline is already close to optimal on this split, so the average current-MLU improvement from temporal history is real but modest. The preliminary resilience experiment supports this concern: changing the objective improves expected future-failure MLU, but does not uniformly improve current MLU or worst-case degradation. Next steps should prioritize stronger temporal stress tests, more faithful dynamic-topology baselines, and direct latency measurements.
 
 Another future direction is to optimize the number of hops from source to destination instead of relying on the model to implicitly learn to minimize it. This could be done using a reinforcement learning mechanism as the last step. This is similar to how reinforcement-learning fine-tuning has been used in large language models to optimize for behavior that differ from original training objective. 
 
@@ -284,4 +264,3 @@ We introduce GRATE, a ML-based TE solver that utilizes a temporal state. We inve
 
 
 \end{document}
-
