@@ -70,12 +70,12 @@ class TransformerModel(nn.Module):
         """
         Args:
             src: [batch_size, seq_len, in_dim]
-            src_key_padding_mask: [batch_size, seq_len]
+            src_key_padding_mask: [batch_size, seq_len], where True marks
+                padded tokens to ignore.
 
         Returns:
             output: [batch_size, seq_len, in_dim]
         """
-
 
         output = self.transformer_encoder(
             src,
@@ -273,7 +273,6 @@ class TunnelEncoder(nn.Module):
                 flat_inputs,
                 src_key_padding_mask=src_key_padding_mask,
             )
-
         flat_outputs = torch.nan_to_num(
             flat_outputs,
             nan=0.0,
@@ -407,6 +406,8 @@ class TunnelEncoder(nn.Module):
         final_path_edge_embeddings = set_outputs[:, :, -1, 1:, :]
 
         final_tm_pred = tm_pred[:, :, -1, :]
+
+
         mlp_inputs = torch.cat((final_path_embeddings, final_tm_pred), dim=-1)
 
         mlp_inputs = torch.nan_to_num(
@@ -541,53 +542,6 @@ class HARP(nn.Module):
 
         self.mlp2.append(nn.Linear(self.mlp_2_dim, 1))
 
-        # Learned next-step K-scenario whole-topology prediction head.
-        # Classes are aligned with generator labels:
-        #   0 -> 1.00 healthy
-        #   1 -> 0.75 capacity
-        #   2 -> 0.50 capacity
-        #   3 -> 0.25 capacity
-        #   4 -> 0.00 full failure
-        #
-        # Unlike the old per-edge marginal head [B, E, S], this head predicts
-        # K complete scenario modes:
-        #   scenario_logits:      [B, K]
-        #   scenario_edge_logits: [B, K, E, S]
-        # Each scenario k is one whole-network next-state hypothesis.
-        self.num_failure_states = int(getattr(props, "num_failure_states", 5))
-        self.num_failure_scenarios = int(getattr(props, "num_failure_scenarios", 5))
-
-        self.failure_scenario_embeddings = nn.Parameter(
-            torch.empty(self.num_failure_scenarios, self.input_dim)
-        )
-        nn.init.kaiming_normal_(self.failure_scenario_embeddings, nonlinearity="relu")
-
-        self.failure_scenario_prob_head = nn.Sequential(
-            nn.Linear(self.input_dim, self.input_dim),
-            nn.LeakyReLU(0.02),
-            nn.Dropout(p=self.dropout),
-            nn.Linear(self.input_dim, self.num_failure_scenarios),
-        )
-
-        self.failure_scenario_edge_head = nn.Sequential(
-            nn.Linear(self.input_dim * 3, self.input_dim),
-            nn.LeakyReLU(0.02),
-            nn.Dropout(p=self.dropout),
-            nn.Linear(self.input_dim, self.num_failure_states),
-        )
-
-        # Memory-safe path chunking controls.
-        # These do not change the model architecture or parameters. They only
-        # change how many paths are materialized at once during forward().
-        self.default_path_chunk_threshold = int(getattr(props, "path_chunk_threshold", 100000))
-        self.default_path_chunk_size = int(getattr(props, "path_chunk_size", 50000))
-        self.default_failure_aggregation_chunk_size = int(
-            getattr(props, "failure_aggregation_chunk_size", 1000000)
-        )
-        self.default_path_chunk_checkpoint = bool(
-            getattr(props, "path_chunk_checkpoint", True)
-        )
-
     def forward(
         self,
         props,
@@ -616,11 +570,9 @@ class HARP(nn.Module):
             padded_edge_ids_per_path: list length T, each [P, L_t]
             paths_to_edges: list length T, each sparse [P, E_t]
 
-        Large-path mode:
-            If P is larger than props.path_chunk_threshold, path encoding is
-            automatically chunked into props.path_chunk_size paths at a time.
-            This preserves the same layers/parameters and avoids materializing
-            [B, P, T, L, D] for huge topologies such as full KDL.
+        Option A assumption:
+            Source-destination pairs and K path slots stay fixed.
+            Actual edge IDs and path edge sequences can change at each timestep.
         """
 
         num_for_loops = props.num_for_loops
@@ -642,44 +594,6 @@ class HARP(nn.Module):
         batch_size = tm_final.shape[0]
 
         if dynamic_topology:
-            final_paths_to_edges = paths_to_edges[-1].coalesce()
-            final_padded_paths = padded_edge_ids_per_path[-1]
-            final_capacities = capacities[-1]
-
-            if final_capacities.dim() == 1:
-                final_capacities = final_capacities.unsqueeze(0).expand(batch_size, -1)
-        else:
-            final_paths_to_edges = paths_to_edges.coalesce()
-            final_padded_paths = padded_edge_ids_per_path
-            final_capacities = self.normalize_capacities(
-                capacities=capacities,
-                batch_size=batch_size,
-                props=props,
-            )
-
-        total_number_of_paths = final_paths_to_edges.shape[0]
-
-        if self.should_chunk_paths(props, total_number_of_paths):
-            return self.forward_chunked_paths(
-                props=props,
-                node_features=node_features,
-                edge_index=edge_index,
-                capacities=capacities,
-                padded_edge_ids_per_path=padded_edge_ids_per_path,
-                tm_history=tm_history,
-                tm_pred_history=tm_pred_history,
-                paths_to_edges=paths_to_edges,
-                dynamic_topology=dynamic_topology,
-                final_paths_to_edges=final_paths_to_edges,
-                final_padded_paths=final_padded_paths,
-                final_capacities=final_capacities,
-                batch_size=batch_size,
-                total_number_of_paths=total_number_of_paths,
-                num_for_loops=num_for_loops,
-                num_paths_per_pair=num_paths_per_pair,
-            )
-
-        if dynamic_topology:
             path_edge_inputs, path_padding_mask = self.compute_dynamic_path_edge_inputs(
                 props=props,
                 node_features=node_features,
@@ -687,6 +601,15 @@ class HARP(nn.Module):
                 capacities_seq=capacities,
                 padded_paths_seq=padded_edge_ids_per_path,
             )
+
+            final_paths_to_edges = paths_to_edges[-1].coalesce()
+            final_padded_paths = padded_edge_ids_per_path[-1]
+            final_capacities = capacities[-1]
+            final_edge_index = edge_index[-1]
+
+            if final_capacities.dim() == 1:
+                final_capacities = final_capacities.unsqueeze(0).expand(batch_size, -1)
+
         else:
             edge_embeddings_with_caps = self.compute_edge_embeddings(
                 props=props,
@@ -700,7 +623,18 @@ class HARP(nn.Module):
                 padded_edge_ids_per_path=padded_edge_ids_per_path,
             )
 
-        gammas, path_edge_embeddings, final_path_embeddings = self.tunnel_encoder(
+            final_paths_to_edges = paths_to_edges.coalesce()
+            final_padded_paths = padded_edge_ids_per_path
+            final_capacities = self.normalize_capacities(
+                capacities=capacities,
+                batch_size=batch_size,
+                props=props,
+            )
+            final_edge_index = edge_index
+
+        total_number_of_paths = final_paths_to_edges.shape[0]
+
+        gammas, path_edge_embeddings, _ = self.tunnel_encoder(
             path_edge_inputs,
             tm_pred_history,
             path_padding_mask,
@@ -754,13 +688,13 @@ class HARP(nn.Module):
             )
 
             dnn_2_inputs = torch.cat(
-                (
-                    bottleneck_path_edge_embeddings,
-                    max_utilization_per_path,
-                    mlu,
-                    tm_pred_final,
-                ),
-                dim=-1,
+            (
+                bottleneck_path_edge_embeddings,
+                max_utilization_per_path,
+                mlu,
+                tm_pred_final,
+            ),
+            dim=-1,
             )
 
             dnn_2_inputs = torch.nan_to_num(
@@ -786,6 +720,7 @@ class HARP(nn.Module):
             delta_gammas = delta_gammas.clamp(min=-50.0, max=50.0)
 
             gammas = gammas.reshape(batch_size, -1, 1)
+
             gammas = torch.nan_to_num(
                 gammas,
                 nan=0.0,
@@ -795,6 +730,7 @@ class HARP(nn.Module):
             gammas = gammas.clamp(min=-50.0, max=50.0)
 
             new_gammas = delta_gammas + gammas
+
             new_gammas = torch.nan_to_num(
                 new_gammas,
                 nan=0.0,
@@ -817,716 +753,34 @@ class HARP(nn.Module):
             add_epsilon=False,
         )
 
-        failure_logits = None
-        if getattr(props, "return_failure_logits", False):
-            failure_logits = self.compute_failure_logits_from_path_embeddings(
-                final_path_embeddings=final_path_embeddings,
-                paths_to_edges=final_paths_to_edges,
-                batch_size=batch_size,
-            )
-
-        if getattr(props, "return_splits", False):
+        if getattr(props, "return_details", False):
             split_ratios = self.compute_split_ratios(
                 new_gammas,
                 batch_size,
                 num_paths_per_pair,
             )
-            if getattr(props, "return_failure_logits", False):
-                return edges_util, split_ratios, failure_logits
-            return edges_util, split_ratios
 
-        if getattr(props, "return_failure_logits", False):
-            return edges_util, None, failure_logits
+            data_on_tunnels = split_ratios * tm_final.squeeze(-1)
+            data_on_links = torch.sparse.mm(
+                final_paths_to_edges.to(dtype=torch.float32).t(),
+                data_on_tunnels.to(dtype=torch.float32).t(),
+            ).t()
+
+            if props.dtype == torch.bfloat16:
+                data_on_links = data_on_links.to(dtype=torch.bfloat16)
+
+            return {
+                "edges_util": edges_util,
+                "gammas": new_gammas,
+                "split_ratios": split_ratios,
+                "data_on_links": data_on_links,
+                "paths_to_edges": final_paths_to_edges,
+                "capacities": final_capacities,
+                "edge_index": final_edge_index,
+                "tm": tm_final,
+            }
 
         return edges_util
-
-    def should_chunk_paths(self, props, total_number_of_paths: int) -> bool:
-        if bool(getattr(props, "disable_path_chunking", False)):
-            return False
-
-        threshold = int(
-            getattr(props, "path_chunk_threshold", self.default_path_chunk_threshold)
-        )
-        chunk_size = int(getattr(props, "path_chunk_size", self.default_path_chunk_size))
-
-        if threshold < 0:
-            return False
-
-        return chunk_size > 0 and int(total_number_of_paths) > threshold
-
-    def get_path_chunk_size(self, props) -> int:
-        return max(1, int(getattr(props, "path_chunk_size", self.default_path_chunk_size)))
-
-    def get_failure_aggregation_chunk_size(self) -> int:
-        return max(1, int(self.default_failure_aggregation_chunk_size))
-
-    def run_tunnel_encoder_chunk(
-        self,
-        props,
-        path_edge_inputs: Tensor,
-        tm_pred_chunk: Tensor,
-        path_padding_mask: Tensor,
-    ):
-        """
-        Runs the existing TunnelEncoder on one path chunk.
-
-        Optional checkpointing reduces activation memory during training without
-        changing the computation. It recomputes the chunk during backward.
-        """
-
-        use_checkpoint = bool(
-            getattr(props, "path_chunk_checkpoint", self.default_path_chunk_checkpoint)
-        )
-
-        if use_checkpoint and self.training and torch.is_grad_enabled():
-            def _chunk_forward(path_edge_inputs_inner, tm_pred_inner, mask_inner):
-                return self.tunnel_encoder(
-                    path_edge_inputs_inner,
-                    tm_pred_inner,
-                    mask_inner,
-                )
-
-            return checkpoint(
-                _chunk_forward,
-                path_edge_inputs,
-                tm_pred_chunk,
-                path_padding_mask,
-                use_reentrant=False,
-            )
-
-        return self.tunnel_encoder(
-            path_edge_inputs,
-            tm_pred_chunk,
-            path_padding_mask,
-        )
-
-    def compute_dynamic_edge_embeddings_sequence(
-        self,
-        props,
-        node_features,
-        edge_indices_seq,
-        capacities_seq,
-    ):
-        """
-        Computes GNN edge embeddings for each timestep once, without expanding
-        them over all paths. This is used by chunked dynamic-topology forward.
-        """
-
-        if node_features.dim() != 4:
-            raise ValueError(
-                "Dynamic topology mode expects node_features shape [B, T, N, F]. "
-                f"Got {tuple(node_features.shape)}"
-            )
-
-        batch_size, num_timesteps, _, _ = node_features.shape
-
-        if not isinstance(edge_indices_seq, (list, tuple)):
-            raise ValueError(
-                "Dynamic topology mode expects edge_index to be a list/tuple of length T."
-            )
-
-        if not isinstance(capacities_seq, (list, tuple)):
-            raise ValueError(
-                "Dynamic topology mode expects capacities to be a list/tuple of length T."
-            )
-
-        if len(edge_indices_seq) != len(capacities_seq) or len(edge_indices_seq) != num_timesteps:
-            raise ValueError(
-                "Dynamic topology sequence lengths must match node_features.shape[1]. "
-                f"Got T={num_timesteps}, "
-                f"edge_indices={len(edge_indices_seq)}, "
-                f"capacities={len(capacities_seq)}"
-            )
-
-        edge_embeddings_seq = []
-
-        for timestep in range(num_timesteps):
-            nf_t = node_features[:, timestep, :, :]
-            edge_index_t = edge_indices_seq[timestep]
-            caps_t = capacities_seq[timestep]
-
-            if caps_t.dim() == 1:
-                caps_t = caps_t.unsqueeze(0).expand(batch_size, -1)
-
-            if props.checkpoint:
-                edge_embeddings_t = checkpoint(
-                    self.gnn,
-                    nf_t,
-                    edge_index_t,
-                    caps_t,
-                    use_reentrant=False,
-                )
-            else:
-                edge_embeddings_t = self.gnn(
-                    nf_t,
-                    edge_index_t,
-                    caps_t,
-                )
-
-            edge_embeddings_seq.append(edge_embeddings_t)
-
-        return edge_embeddings_seq
-
-    def gather_dynamic_path_edge_inputs_chunk(
-        self,
-        edge_embeddings_seq,
-        padded_paths_seq,
-        start: int,
-        end: int,
-    ):
-        """
-        Gathers [B, chunk, T, Lmax, D] for a path range under dynamic topology.
-        Only this chunk is materialized.
-        """
-
-        if not isinstance(padded_paths_seq, (list, tuple)):
-            raise ValueError(
-                "Dynamic topology mode expects padded_edge_ids_per_path "
-                "to be a list/tuple of length T."
-            )
-
-        if len(edge_embeddings_seq) != len(padded_paths_seq):
-            raise ValueError(
-                f"edge_embeddings_seq length {len(edge_embeddings_seq)} does not match "
-                f"padded_paths_seq length {len(padded_paths_seq)}"
-            )
-
-        max_path_length = max(p.shape[1] for p in padded_paths_seq)
-
-        path_inputs_over_time = []
-        path_masks_over_time = []
-
-        for timestep in range(len(padded_paths_seq)):
-            padded_paths_chunk_t = padded_paths_seq[timestep][start:end]
-
-            path_edge_inputs_t, path_mask_t = self.gather_path_edge_inputs(
-                edge_embeddings_with_caps=edge_embeddings_seq[timestep],
-                padded_edge_ids_per_path=padded_paths_chunk_t,
-            )
-
-            current_length = path_edge_inputs_t.shape[2]
-
-            if current_length < max_path_length:
-                pad_len = max_path_length - current_length
-
-                path_edge_inputs_t = F.pad(
-                    path_edge_inputs_t,
-                    pad=(0, 0, 0, pad_len),
-                    value=0.0,
-                )
-
-                path_mask_t = F.pad(
-                    path_mask_t,
-                    pad=(0, pad_len),
-                    value=True,
-                )
-
-            path_inputs_over_time.append(path_edge_inputs_t)
-            path_masks_over_time.append(path_mask_t)
-
-        path_edge_inputs = torch.stack(path_inputs_over_time, dim=2).contiguous()
-        path_padding_mask = torch.stack(path_masks_over_time, dim=2).contiguous()
-
-        return path_edge_inputs, path_padding_mask
-
-    def gather_path_edge_inputs_chunk(
-        self,
-        edge_embeddings_source,
-        padded_edge_ids_per_path,
-        start: int,
-        end: int,
-        dynamic_topology: bool,
-    ):
-        """
-        Gathers the path-edge tensor for one path chunk.
-
-        Static temporal source:
-            edge_embeddings_source [B, T, E, D]
-            padded_edge_ids_per_path [P, L]
-
-        Dynamic source:
-            edge_embeddings_source is a list length T of [B, E_t, D]
-            padded_edge_ids_per_path is a list length T of [P, L_t]
-        """
-
-        if dynamic_topology:
-            return self.gather_dynamic_path_edge_inputs_chunk(
-                edge_embeddings_seq=edge_embeddings_source,
-                padded_paths_seq=padded_edge_ids_per_path,
-                start=start,
-                end=end,
-            )
-
-        return self.gather_path_edge_inputs(
-            edge_embeddings_with_caps=edge_embeddings_source,
-            padded_edge_ids_per_path=padded_edge_ids_per_path[start:end],
-        )
-
-    def slice_pte_info_for_path_range(self, pte_info, start: int, end: int):
-        """
-        Creates pte_info for paths [start, end) without scanning all path-edge
-        incidences when paths_to_edges is coalesced/sorted.
-        """
-
-        paths_to_edges, row_indices, col_indices, values = pte_info
-        device = row_indices.device
-
-        start_t = torch.tensor(start, device=device, dtype=row_indices.dtype)
-        end_t = torch.tensor(end, device=device, dtype=row_indices.dtype)
-
-        lo = torch.searchsorted(row_indices, start_t, right=False)
-        hi = torch.searchsorted(row_indices, end_t, right=False)
-
-        row_chunk = row_indices[lo:hi] - int(start)
-        col_chunk = col_indices[lo:hi]
-        values_chunk = values[lo:hi]
-
-        indices_chunk = torch.stack((row_chunk, col_chunk), dim=0)
-
-        pte_chunk = torch.sparse_coo_tensor(
-            indices_chunk,
-            values_chunk,
-            size=(int(end - start), paths_to_edges.shape[1]),
-            device=values.device,
-            dtype=values.dtype,
-        ).coalesce()
-
-        return [
-            pte_chunk,
-            pte_chunk.indices()[0],
-            pte_chunk.indices()[1],
-            pte_chunk.values(),
-        ]
-
-    def compute_mlu_chunk_from_edges_util(
-        self,
-        edges_util,
-        batch_size: int,
-        chunk_size: int,
-        subtract_epsilon: bool = True,
-    ):
-        mlu, _ = torch.max(edges_util, dim=-1)
-
-        if subtract_epsilon:
-            mlu = mlu - epsilon
-
-        return mlu.view(batch_size, 1, 1).expand(-1, chunk_size, -1)
-
-    def forward_chunked_paths(
-        self,
-        props,
-        node_features,
-        edge_index,
-        capacities,
-        padded_edge_ids_per_path,
-        tm_history,
-        tm_pred_history,
-        paths_to_edges,
-        dynamic_topology: bool,
-        final_paths_to_edges,
-        final_padded_paths,
-        final_capacities,
-        batch_size: int,
-        total_number_of_paths: int,
-        num_for_loops: int,
-        num_paths_per_pair: int,
-    ):
-        """
-        Memory-safe forward path for large P.
-
-        It uses the exact same GNN, TunnelEncoder, RAU MLP, split softmax, and
-        failure heads as the normal forward. The only difference is that path
-        encoding and per-path RAU work are performed in chunks.
-        """
-
-        chunk_size = self.get_path_chunk_size(props)
-
-        if dynamic_topology:
-            edge_embeddings_source = self.compute_dynamic_edge_embeddings_sequence(
-                props=props,
-                node_features=node_features,
-                edge_indices_seq=edge_index,
-                capacities_seq=capacities,
-            )
-            padded_source = padded_edge_ids_per_path
-        else:
-            edge_embeddings_source = self.compute_edge_embeddings(
-                props=props,
-                node_features=node_features,
-                edge_index=edge_index,
-                capacities=capacities,
-            )
-            padded_source = padded_edge_ids_per_path
-
-        gamma_chunks = []
-        final_path_embedding_chunks = []
-
-        need_failure_embeddings = bool(getattr(props, "return_failure_logits", False))
-
-        for start in range(0, total_number_of_paths, chunk_size):
-            end = min(start + chunk_size, total_number_of_paths)
-
-            path_edge_inputs_chunk, path_padding_mask_chunk = self.gather_path_edge_inputs_chunk(
-                edge_embeddings_source=edge_embeddings_source,
-                padded_edge_ids_per_path=padded_source,
-                start=start,
-                end=end,
-                dynamic_topology=dynamic_topology,
-            )
-
-            tm_pred_chunk = tm_pred_history[:, :, start:end, :]
-
-            (
-                gammas_chunk,
-                _path_edge_embeddings_chunk,
-                final_path_embeddings_chunk,
-            ) = self.run_tunnel_encoder_chunk(
-                props=props,
-                path_edge_inputs=path_edge_inputs_chunk,
-                tm_pred_chunk=tm_pred_chunk,
-                path_padding_mask=path_padding_mask_chunk,
-            )
-
-            gamma_chunks.append(gammas_chunk)
-
-            if need_failure_embeddings:
-                final_path_embedding_chunks.append(final_path_embeddings_chunk)
-
-        gammas = torch.cat(gamma_chunks, dim=1)
-
-        if need_failure_embeddings:
-            final_path_embeddings = torch.cat(final_path_embedding_chunks, dim=1)
-        else:
-            final_path_embeddings = None
-
-        final_paths_to_edges = final_paths_to_edges.coalesce()
-        indices = final_paths_to_edges.indices()
-        values = final_paths_to_edges.values()
-
-        pte_info = [
-            final_paths_to_edges,
-            indices[0],
-            indices[1],
-            values,
-        ]
-
-        tm_final = tm_history[:, -1]
-        tm_pred_final = tm_pred_history[:, -1]
-
-        for i in range(num_for_loops):
-            if i > 0:
-                gammas = new_gammas
-
-            edges_util = self.compute_edge_utils(
-                gammas=gammas,
-                paths_to_edges=final_paths_to_edges,
-                tm=tm_pred_final,
-                capacities=final_capacities,
-                props=props,
-                batch_size=batch_size,
-                num_paths_per_pair=num_paths_per_pair,
-                add_epsilon=True,
-            )
-
-            new_gamma_chunks = []
-
-            for start in range(0, total_number_of_paths, chunk_size):
-                end = min(start + chunk_size, total_number_of_paths)
-                current_chunk_size = int(end - start)
-
-                path_edge_inputs_chunk, path_padding_mask_chunk = self.gather_path_edge_inputs_chunk(
-                    edge_embeddings_source=edge_embeddings_source,
-                    padded_edge_ids_per_path=padded_source,
-                    start=start,
-                    end=end,
-                    dynamic_topology=dynamic_topology,
-                )
-
-                tm_pred_chunk = tm_pred_history[:, :, start:end, :]
-
-                (
-                    _gammas_chunk_unused,
-                    path_edge_embeddings_chunk,
-                    _final_path_embeddings_chunk_unused,
-                ) = self.run_tunnel_encoder_chunk(
-                    props=props,
-                    path_edge_inputs=path_edge_inputs_chunk,
-                    tm_pred_chunk=tm_pred_chunk,
-                    path_padding_mask=path_padding_mask_chunk,
-                )
-
-                pte_info_chunk = self.slice_pte_info_for_path_range(
-                    pte_info=pte_info,
-                    start=start,
-                    end=end,
-                )
-
-                padded_chunk = final_padded_paths[start:end]
-
-                (
-                    bottleneck_path_edge_embeddings,
-                    max_utilization_per_path,
-                ) = self.compute_bottleneck_link_mlu_per_path(
-                    edge_utils=edges_util,
-                    padded_edge_ids_per_path=padded_chunk,
-                    path_edge_embeddings=path_edge_embeddings_chunk,
-                    batch_size=batch_size,
-                    total_number_of_paths=current_chunk_size,
-                    pte_info=pte_info_chunk,
-                )
-
-                mlu_chunk = self.compute_mlu_chunk_from_edges_util(
-                    edges_util=edges_util,
-                    batch_size=batch_size,
-                    chunk_size=current_chunk_size,
-                    subtract_epsilon=True,
-                )
-
-                tm_pred_final_chunk = tm_pred_final[:, start:end, :]
-
-                dnn_2_inputs = torch.cat(
-                    (
-                        bottleneck_path_edge_embeddings,
-                        max_utilization_per_path,
-                        mlu_chunk,
-                        tm_pred_final_chunk,
-                    ),
-                    dim=-1,
-                )
-
-                dnn_2_inputs = torch.nan_to_num(
-                    dnn_2_inputs,
-                    nan=0.0,
-                    posinf=1e6,
-                    neginf=-1e6,
-                )
-                dnn_2_inputs = dnn_2_inputs.clamp(min=-1e6, max=1e6)
-
-                delta_gammas = self.forward_pass_mlp(
-                    dnn_2_inputs,
-                    self.mlp2,
-                    self.num_mlp2_hidden_layers,
-                )
-
-                delta_gammas = torch.nan_to_num(
-                    delta_gammas,
-                    nan=0.0,
-                    posinf=50.0,
-                    neginf=-50.0,
-                )
-                delta_gammas = delta_gammas.clamp(min=-50.0, max=50.0)
-
-                gammas_chunk_current = gammas[:, start:end, :].reshape(
-                    batch_size,
-                    -1,
-                    1,
-                )
-                gammas_chunk_current = torch.nan_to_num(
-                    gammas_chunk_current,
-                    nan=0.0,
-                    posinf=50.0,
-                    neginf=-50.0,
-                )
-                gammas_chunk_current = gammas_chunk_current.clamp(min=-50.0, max=50.0)
-
-                new_gammas_chunk = delta_gammas + gammas_chunk_current
-                new_gammas_chunk = torch.nan_to_num(
-                    new_gammas_chunk,
-                    nan=0.0,
-                    posinf=50.0,
-                    neginf=-50.0,
-                )
-                new_gammas_chunk = new_gammas_chunk.clamp(min=-50.0, max=50.0)
-
-                new_gamma_chunks.append(new_gammas_chunk)
-
-            new_gammas = torch.cat(new_gamma_chunks, dim=1)
-
-        if num_for_loops == 0:
-            new_gammas = gammas
-
-        edges_util = self.compute_edge_utils(
-            gammas=new_gammas,
-            paths_to_edges=final_paths_to_edges,
-            tm=tm_final,
-            capacities=final_capacities,
-            props=props,
-            batch_size=batch_size,
-            num_paths_per_pair=num_paths_per_pair,
-            add_epsilon=False,
-        )
-
-        failure_logits = None
-        if getattr(props, "return_failure_logits", False):
-            failure_logits = self.compute_failure_logits_from_path_embeddings(
-                final_path_embeddings=final_path_embeddings,
-                paths_to_edges=final_paths_to_edges,
-                batch_size=batch_size,
-            )
-
-        if getattr(props, "return_splits", False):
-            split_ratios = self.compute_split_ratios(
-                new_gammas,
-                batch_size,
-                num_paths_per_pair,
-            )
-            if getattr(props, "return_failure_logits", False):
-                return edges_util, split_ratios, failure_logits
-            return edges_util, split_ratios
-
-        if getattr(props, "return_failure_logits", False):
-            return edges_util, None, failure_logits
-
-        return edges_util
-
-    def compute_failure_logits_from_path_embeddings(
-        self,
-        final_path_embeddings: Tensor,
-        paths_to_edges,
-        batch_size: int,
-    ):
-        """
-        Aggregates temporal path embeddings into edge embeddings and predicts
-        K complete next-step topology/capacity-state scenarios.
-
-        Args:
-            final_path_embeddings: [B, P, D]
-            paths_to_edges: sparse [P, E_final]
-
-        Returns:
-            failure_output dict:
-                scenario_logits:      [B, K]
-                scenario_edge_logits: [B, K, E_final, num_failure_states]
-
-        This version aggregates path messages in incidence chunks, so huge
-        topologies do not materialize final_path_embeddings[:, row_indices, :]
-        for every path-edge incidence all at once.
-        """
-
-        if final_path_embeddings is None:
-            raise ValueError(
-                "final_path_embeddings is required when return_failure_logits=True"
-            )
-
-        paths_to_edges = paths_to_edges.coalesce()
-        indices = paths_to_edges.indices()
-        row_indices = indices[0]  # path ids
-        col_indices = indices[1]  # edge ids
-
-        num_edges = paths_to_edges.shape[1]
-        feat_dim = final_path_embeddings.shape[-1]
-
-        edge_embeddings = torch.zeros(
-            batch_size,
-            num_edges,
-            feat_dim,
-            device=final_path_embeddings.device,
-            dtype=final_path_embeddings.dtype,
-        )
-
-        counts = torch.zeros(
-            1,
-            num_edges,
-            1,
-            device=final_path_embeddings.device,
-            dtype=final_path_embeddings.dtype,
-        )
-
-        if row_indices.numel() > 0:
-            aggregation_chunk_size = self.get_failure_aggregation_chunk_size()
-
-            for start in range(0, int(row_indices.numel()), aggregation_chunk_size):
-                end = min(start + aggregation_chunk_size, int(row_indices.numel()))
-
-                row_chunk = row_indices[start:end]
-                col_chunk = col_indices[start:end]
-
-                path_messages = final_path_embeddings[:, row_chunk, :]
-
-                scatter_index = col_chunk.view(1, -1, 1).expand(
-                    batch_size,
-                    -1,
-                    feat_dim,
-                )
-
-                edge_embeddings.scatter_add_(
-                    dim=1,
-                    index=scatter_index,
-                    src=path_messages,
-                )
-
-                count_index = col_chunk.view(1, -1, 1)
-                counts.scatter_add_(
-                    dim=1,
-                    index=count_index,
-                    src=torch.ones(
-                        1,
-                        col_chunk.numel(),
-                        1,
-                        device=final_path_embeddings.device,
-                        dtype=final_path_embeddings.dtype,
-                    ),
-                )
-
-            edge_embeddings = edge_embeddings / counts.clamp_min(1.0)
-
-        if num_edges > 0:
-            global_embedding = edge_embeddings.mean(dim=1)
-        else:
-            global_embedding = torch.zeros(
-                batch_size,
-                feat_dim,
-                device=final_path_embeddings.device,
-                dtype=final_path_embeddings.dtype,
-            )
-
-        scenario_logits = self.failure_scenario_prob_head(global_embedding)
-
-        scenario_embeddings = self.failure_scenario_embeddings.to(
-            device=edge_embeddings.device,
-            dtype=edge_embeddings.dtype,
-        )
-
-        K = self.num_failure_scenarios
-        edge_inputs = edge_embeddings.unsqueeze(1).expand(-1, K, -1, -1)
-        scenario_inputs = scenario_embeddings.view(1, K, 1, feat_dim).expand(
-            batch_size,
-            -1,
-            num_edges,
-            -1,
-        )
-        global_inputs = global_embedding.view(batch_size, 1, 1, feat_dim).expand(
-            -1,
-            K,
-            num_edges,
-            -1,
-        )
-
-        scenario_edge_inputs = torch.cat(
-            (edge_inputs, scenario_inputs, global_inputs),
-            dim=-1,
-        )
-
-        scenario_edge_logits = self.failure_scenario_edge_head(scenario_edge_inputs)
-
-        scenario_logits = torch.nan_to_num(
-            scenario_logits,
-            nan=0.0,
-            posinf=50.0,
-            neginf=-50.0,
-        ).clamp(min=-50.0, max=50.0)
-
-        scenario_edge_logits = torch.nan_to_num(
-            scenario_edge_logits,
-            nan=0.0,
-            posinf=50.0,
-            neginf=-50.0,
-        ).clamp(min=-50.0, max=50.0)
-
-        return {
-            "scenario_logits": scenario_logits,
-            "scenario_edge_logits": scenario_edge_logits,
-        }
 
     def is_dynamic_topology_input(
         self,
@@ -1934,80 +1188,125 @@ class HARP(nn.Module):
         pte_info,
     ):
         """
-        Args:
-            edge_utils:
-                [B, E_final]
+        Safer bottleneck-link lookup.
 
-            padded_edge_ids_per_path:
-                [P, L_final]
+        Original HARP used torch_scatter over paths_to_edges, then tried to map
+        the scatter argmax back into padded_edge_ids_per_path. That is brittle
+        for dynamic topology because edge IDs/path padding can change per sample.
 
-            path_edge_embeddings:
-                [B, P, Lmax, D]
+        This version directly uses padded_edge_ids_per_path:
+
+            edge_utils: [B, E_final]
+            padded_edge_ids_per_path: [P, L_final], padded with -1
+            path_edge_embeddings: [B, P, Lmax, D]
 
         Returns:
-            bottleneck_path_edge_embeddings:
-                [B, P, D]
-
-            max_utilization_per_path:
-                [B, P, 1]
+            bottleneck_path_edge_embeddings: [B, P, D]
+            max_utilization_per_path: [B, P, 1]
         """
 
-        paths_to_edges, row_indices, col_indices, values = pte_info
+        if padded_edge_ids_per_path.dim() != 2:
+            raise ValueError(
+                "padded_edge_ids_per_path must have shape [P, L]. "
+                f"Got {tuple(padded_edge_ids_per_path.shape)}"
+            )
 
-        max_utilization_per_path, max_indices = torch_scatter.scatter_max(
-            edge_utils[:, col_indices] * values,
-            row_indices,
-            dim=1,
-            dim_size=paths_to_edges.shape[0],
+        if edge_utils.dim() != 2:
+            raise ValueError(
+                "edge_utils must have shape [B, E]. "
+                f"Got {tuple(edge_utils.shape)}"
+            )
+
+        if path_edge_embeddings.dim() != 4:
+            raise ValueError(
+                "path_edge_embeddings must have shape [B, P, L, D]. "
+                f"Got {tuple(path_edge_embeddings.shape)}"
+            )
+
+        device = edge_utils.device
+
+        padded_edge_ids_per_path = padded_edge_ids_per_path.to(device=device)
+
+        P, L_final = padded_edge_ids_per_path.shape
+        B, E_final = edge_utils.shape
+        _, P_embed, L_embed, D = path_edge_embeddings.shape
+
+        if P != total_number_of_paths:
+            raise ValueError(
+                f"Path count mismatch: padded paths has P={P}, "
+                f"total_number_of_paths={total_number_of_paths}"
+            )
+
+        if P_embed != P:
+            raise ValueError(
+                f"Path embedding count mismatch: path_edge_embeddings has P={P_embed}, "
+                f"padded paths has P={P}"
+            )
+
+        if L_final > L_embed:
+            raise ValueError(
+                f"Final padded path length L_final={L_final} is larger than "
+                f"path_edge_embeddings length L_embed={L_embed}"
+            )
+
+        valid_mask = padded_edge_ids_per_path.ge(0)
+
+        safe_edge_ids = padded_edge_ids_per_path.clamp(min=0)
+
+        if safe_edge_ids.numel() > 0:
+            max_edge_id = int(safe_edge_ids.max().detach().cpu())
+            if max_edge_id >= E_final:
+                raise ValueError(
+                    f"padded_edge_ids_per_path contains edge id {max_edge_id}, "
+                    f"but edge_utils only has {E_final} edges."
+                )
+
+        # Gather edge utilization for every edge position in every path.
+        # edge_utils: [B, E]
+        # safe_edge_ids: [P, L]
+        # gathered_utils: [B, P, L]
+        gather_ids = safe_edge_ids.view(1, P, L_final).expand(B, -1, -1)
+        expanded_edge_utils = edge_utils.view(B, 1, E_final).expand(-1, P, -1)
+
+        gathered_utils = torch.gather(
+            expanded_edge_utils,
+            dim=2,
+            index=gather_ids,
         )
+
+        # Ignore padded positions.
+        gathered_utils = gathered_utils.masked_fill(
+            ~valid_mask.view(1, P, L_final),
+            float("-inf"),
+        )
+
+        max_utilization_per_path, bottleneck_positions = gathered_utils.max(dim=2)
+
+        # Safety: if a path somehow has no valid edges, avoid indexing garbage.
+        no_valid_path = ~valid_mask.any(dim=1)
+
+        if no_valid_path.any():
+            bottleneck_positions = bottleneck_positions.masked_fill(
+                no_valid_path.view(1, P),
+                0,
+            )
+            max_utilization_per_path = max_utilization_per_path.masked_fill(
+                no_valid_path.view(1, P),
+                0.0,
+            )
+
+        # Gather the embedding at the bottleneck position.
+        # path_edge_embeddings: [B, P, L_embed, D]
+        batch_indices = torch.arange(B, device=device).view(B, 1).expand(B, P)
+        path_indices = torch.arange(P, device=device).view(1, P).expand(B, P)
+
+        bottleneck_path_edge_embeddings = path_edge_embeddings[
+            batch_indices,
+            path_indices,
+            bottleneck_positions,
+        ]
 
         max_utilization_per_path = max_utilization_per_path - epsilon
-
-        try:
-            max_indices = col_indices[max_indices]
-        except Exception:
-            print("max_indices.shape:", max_indices.shape)
-            print("max_indices.device:", max_indices.device)
-            print("max_indices.dtype:", max_indices.dtype)
-            print("max_indices contains NaN:", torch.isnan(max_indices).any().item())
-            print("max_indices contains Inf:", torch.isinf(max_indices).any().item())
-            print(max_indices.max())
-            print(col_indices.max())
-            print("Out of bound indexing!!")
-            exit(1)
-
-        max_indices_expanded = max_indices.unsqueeze(2).expand(
-            -1,
-            -1,
-            padded_edge_ids_per_path.size(1),
-        )
-
-        matches = max_indices_expanded == padded_edge_ids_per_path
-
-        try:
-            positions = torch.where(matches)
-        except Exception as e:
-            print(e)
-            print(edge_utils.max())
-            print("edge_utils contains NaN:", torch.isnan(edge_utils).any().item())
-            print("edge_utils contains Inf:", torch.isinf(edge_utils).any().item())
-            print(max_indices_expanded.shape, padded_edge_ids_per_path.shape)
-            print(max_indices_expanded.max())
-            print(padded_edge_ids_per_path.max())
-            print(matches.max())
-            print("Out of bound indexing!!")
-            exit(1)
-
-        positions = torch.stack(positions, dim=-1)
-        positions = positions.view(batch_size, total_number_of_paths, -1)
-
-        dim0_range = positions[:, :, 0].view(batch_size, total_number_of_paths, -1)
-        dim1_range = positions[:, :, 1].view(batch_size, total_number_of_paths, -1)
-        positions = positions[:, :, -1].view(batch_size, total_number_of_paths, -1)
-
-        bottleneck_path_edge_embeddings = (
-            path_edge_embeddings[dim0_range, dim1_range, positions]
-        ).squeeze(-2)
 
         return bottleneck_path_edge_embeddings, max_utilization_per_path.unsqueeze(-1)
 
@@ -2098,9 +1397,20 @@ class HARP(nn.Module):
         if props.dtype == torch.bfloat16:
             data_on_links = data_on_links.to(dtype=torch.bfloat16)
 
+        capacities = capacities.clamp_min(1e-6)
+
         if add_epsilon:
             edges_util = data_on_links / capacities + epsilon
         else:
             edges_util = data_on_links / capacities
+
+        edges_util = torch.nan_to_num(
+            edges_util,
+            nan=0.0,
+            posinf=1e6,
+            neginf=0.0,
+        )
+
+        edges_util = edges_util.clamp(min=0.0, max=1e6)
 
         return edges_util

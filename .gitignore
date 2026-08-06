@@ -1,21 +1,59 @@
-# Logs
+# =========================
+# Logs / job output
+# =========================
 *.log
+*.out
 logs/
 
-# Data
+# =========================
+# Large datasets / generated data
+# =========================
 data/
+downloads/
+traffic_matrices/
+prepare_abilene/
+results/
+
+dynamic_abilene_h6_realistic_learned_failure/
+dynamic_geant_h6_realistic_learned_failure/
+
+# Generated experiment artifacts
+checkpoints/
+pairs/
+manifest/
+
+# =========================
+# Large serialized / model files
+# =========================
 *.csv
 *.json
 *.pkl
 *.h5
 *.pt
 
+# =========================
 # Python
+# =========================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
 .env
+.env.*
+venv/
+.venv/
 harp_env/
 
-# Data
-prepare_abilene/
-results/
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db

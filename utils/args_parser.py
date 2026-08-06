@@ -53,11 +53,20 @@ def add_default_args(parser):
     parser.add_argument("--dynamic_test_end_idx", type=int, default=None)
 
     # If dynamic samples include sample["opt"], this controls whether to use it.
+    # For the no-Gurobi resilience objective, set this to 0.
     parser.add_argument("--use_dynamic_opt", type=int, default=1)
 
     # Optional Gurobi split imitation / distillation loss.
     # Requires sample["opt_splits"] from add_dynamic_gurobi_opt.py.
+    # For the no-Gurobi resilience objective, keep this at 0.
     parser.add_argument("--split_loss_weight", type=float, default=0.0)
+
+    # Resilience-objective arguments.
+    parser.add_argument("--use_resilience_objective", type=int, default=0)
+    parser.add_argument("--resilience_loss_weight", type=float, default=0.0)
+    parser.add_argument("--soft_backup_penalty_weight", type=float, default=0.0)
+    parser.add_argument("--candidate_local_rescale", type=int, default=1)
+    parser.add_argument("--disconnected_penalty", type=float, default=100.0)
 
     # Temporal-HARP extra args used by harp_system.py
     parser.add_argument("--use_temporal_cls", type=int, default=1)
@@ -84,6 +93,8 @@ def parse_args(args):
     args_.meta_learning = bool(args_.meta_learning)
     args_.pred = bool(args_.pred)
     args_.use_dynamic_opt = bool(args_.use_dynamic_opt)
+    args_.use_resilience_objective = bool(args_.use_resilience_objective)
+    args_.candidate_local_rescale = bool(args_.candidate_local_rescale)
     args_.use_temporal_cls = bool(args_.use_temporal_cls)
     args_.use_temporal_residual = bool(args_.use_temporal_residual)
     args_.return_splits = bool(args_.return_splits)

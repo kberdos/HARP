@@ -53,6 +53,22 @@ def _strip_dynamic_args(argv):
     # If false or opt is absent, train/validate/test using raw MLU = predicted.max().
     parser.add_argument("--use_dynamic_opt", type=int, default=1)
 
+    # Resilience-objective controls.
+    parser.add_argument("--use_resilience_objective", type=int, default=0)
+    parser.add_argument("--resilience_loss_weight", type=float, default=0.0)
+    parser.add_argument("--soft_backup_penalty_weight", type=float, default=0.0)
+    parser.add_argument("--future_local_rescale", type=int, default=1)
+    # Kept only so old scripts do not crash; future_local_rescale is preferred.
+    parser.add_argument("--candidate_local_rescale", type=int, default=None)
+    parser.add_argument("--failure_prediction_loss_weight", type=float, default=0.1)
+    parser.add_argument("--num_failure_states", type=int, default=5)
+    parser.add_argument("--num_failure_scenarios", type=int, default=5)
+    parser.add_argument("--scenario_probability_loss_weight", type=float, default=1.0)
+    parser.add_argument("--scenario_capacity_mode", type=str, default="hard")
+    parser.add_argument("--detach_scenario_probabilities", type=int, default=1)
+    parser.add_argument("--detach_scenario_capacities", type=int, default=1)
+    parser.add_argument("--disconnected_penalty", type=float, default=100.0)
+
     dynamic_args, remaining_argv = parser.parse_known_args(argv)
     return dynamic_args, remaining_argv
 
@@ -74,6 +90,23 @@ props.dynamic_val_end_idx = dynamic_args.dynamic_val_end_idx
 props.dynamic_test_start_idx = dynamic_args.dynamic_test_start_idx
 props.dynamic_test_end_idx = dynamic_args.dynamic_test_end_idx
 props.use_dynamic_opt = bool(dynamic_args.use_dynamic_opt)
+props.use_resilience_objective = bool(dynamic_args.use_resilience_objective)
+props.resilience_loss_weight = float(dynamic_args.resilience_loss_weight)
+props.soft_backup_penalty_weight = float(dynamic_args.soft_backup_penalty_weight)
+props.future_local_rescale = bool(dynamic_args.future_local_rescale)
+props.candidate_local_rescale = (
+    bool(dynamic_args.candidate_local_rescale)
+    if dynamic_args.candidate_local_rescale is not None
+    else props.future_local_rescale
+)
+props.failure_prediction_loss_weight = float(dynamic_args.failure_prediction_loss_weight)
+props.num_failure_states = int(dynamic_args.num_failure_states)
+props.num_failure_scenarios = int(dynamic_args.num_failure_scenarios)
+props.scenario_probability_loss_weight = float(dynamic_args.scenario_probability_loss_weight)
+props.scenario_capacity_mode = str(dynamic_args.scenario_capacity_mode)
+props.detach_scenario_probabilities = bool(dynamic_args.detach_scenario_probabilities)
+props.detach_scenario_capacities = bool(dynamic_args.detach_scenario_capacities)
+props.disconnected_penalty = float(dynamic_args.disconnected_penalty)
 
 if props.dtype.lower() == "float32":
     props.dtype = torch.float32
@@ -151,6 +184,18 @@ if props.mode.lower() == "train":
         print(f"Train samples: {len(train_dataset)}")
         print(f"Val samples: {len(val_dataset)}")
         print(f"Using opt when available: {props.use_dynamic_opt}")
+        print(f"Using resilience objective: {props.use_resilience_objective}")
+        print(f"Resilience loss weight lambda: {props.resilience_loss_weight}")
+        print(f"Soft backup penalty weight mu: {props.soft_backup_penalty_weight}")
+        print(f"Failure prediction loss weight beta: {props.failure_prediction_loss_weight}")
+        print(f"Future local rescale: {props.future_local_rescale}")
+        print(f"Number of failure states: {props.num_failure_states}")
+        print(f"Number of failure scenarios K: {props.num_failure_scenarios}")
+        print(f"Scenario probability loss weight: {props.scenario_probability_loss_weight}")
+        print(f"Scenario capacity mode: {props.scenario_capacity_mode}")
+        print(f"Detach scenario probabilities: {props.detach_scenario_probabilities}")
+        print(f"Detach scenario capacities: {props.detach_scenario_capacities}")
+        print(f"Disconnected penalty: {props.disconnected_penalty}")
 
         for epoch in range(n_epochs):
             model.train()
